@@ -1,0 +1,12 @@
+version: '3.8'
+services:
+  openscanproxy:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    volumes:
+      - ../configs:/app/configs
+      - ../logs:/app/logs
