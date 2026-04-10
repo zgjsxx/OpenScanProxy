@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include <cstring>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -56,6 +57,26 @@ std::pair<std::string, uint16_t> split_host_port(const std::string& hp, uint16_t
   return {hp.substr(0, pos), static_cast<uint16_t>(std::stoi(hp.substr(pos + 1)))};
 }
 
+audit::AuditEvent make_access_event(const std::string& timestamp, const std::string& client_addr, const std::string& host,
+                                    const std::string& url, const std::string& method, int status_code,
+                                    std::uint64_t latency_ms, std::size_t bytes_in, std::size_t bytes_out,
+                                    bool https_mitm) {
+  audit::AuditEvent event;
+  event.event_type = "access";
+  event.timestamp = timestamp;
+  event.client_addr = client_addr;
+  event.host = host;
+  event.url = url;
+  event.method = method;
+  event.status_code = status_code;
+  event.latency_ms = latency_ms;
+  event.bytes_in = bytes_in;
+  event.bytes_out = bytes_out;
+  event.https_mitm = https_mitm;
+  event.action = status_code >= 400 ? "error" : "allow";
+  return event;
+}
+
 }  // namespace
 
 void ProxyServer::run() {
@@ -82,10 +103,14 @@ void ProxyServer::run() {
 }
 
 void ProxyServer::handle_client(int cfd, const std::string& client_addr) {
+  auto start = std::chrono::steady_clock::now();
   runtime_.stats.inc_total_requests();
   char buf[1024 * 1024];
   auto n = recv(cfd, buf, sizeof(buf), 0);
+  std::size_t bytes_in = n > 0 ? static_cast<std::size_t>(n) : 0;
   if (n <= 0) {
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    runtime_.audit.write(make_access_event(core::now_iso8601(), client_addr, "", "", "", 400, ms, bytes_in, 0, false));
     close(cfd);
     return;
   }
@@ -95,6 +120,12 @@ void ProxyServer::handle_client(int cfd, const std::string& client_addr) {
   std::istringstream fl(first);
   std::string method, target;
   fl >> method >> target;
+  if (method.empty()) {
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    runtime_.audit.write(make_access_event(core::now_iso8601(), client_addr, "", target, method, 400, ms, bytes_in, 0, false));
+    close(cfd);
+    return;
+  }
 
   if (method == "CONNECT") {
     handle_connect_tunnel(cfd, target, client_addr);
@@ -104,17 +135,24 @@ void ProxyServer::handle_client(int cfd, const std::string& client_addr) {
   close(cfd);
 }
 
-void ProxyServer::handle_connect_tunnel(int cfd, const std::string& target, const std::string&) {
+void ProxyServer::handle_connect_tunnel(int cfd, const std::string& target, const std::string& client_addr) {
+  auto start = std::chrono::steady_clock::now();
   auto [host, port] = split_host_port(target, 443);
   int sfd = connect_host_port(host, port);
   if (sfd < 0) {
     std::string fail = "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 11\r\n\r\nbad gateway";
     send(cfd, fail.data(), fail.size(), 0);
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    runtime_.audit.write(
+        make_access_event(core::now_iso8601(), client_addr, host, target, "CONNECT", 502, ms, 0, fail.size(), false));
     return;
   }
 
   std::string ok = "HTTP/1.1 200 Connection Established\r\n\r\n";
   send(cfd, ok.data(), ok.size(), 0);
+  auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+  runtime_.audit.write(make_access_event(core::now_iso8601(), client_addr, host, target, "CONNECT", 200, ms, 0, ok.size(),
+                                         runtime_.config.enable_https_mitm));
 
   if (!runtime_.config.enable_https_mitm) {
     relay_bidirectional(cfd, sfd);
@@ -185,11 +223,21 @@ void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host)
 }
 
 void ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, const std::string& raw) {
+  auto start = std::chrono::steady_clock::now();
+  std::size_t bytes_in = raw.size();
   http::HttpRequest req;
-  if (!http::parse_request(raw, req)) return;
+  if (!http::parse_request(raw, req)) {
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    runtime_.audit.write(make_access_event(core::now_iso8601(), client_addr, "", "", "", 400, ms, bytes_in, 0, false));
+    return;
+  }
 
   auto host_h = http::header_get(req.headers, "Host");
-  if (host_h.empty()) return;
+  if (host_h.empty()) {
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    runtime_.audit.write(make_access_event(core::now_iso8601(), client_addr, "", req.uri, req.method, 400, ms, bytes_in, 0, false));
+    return;
+  }
   auto [host, port] = split_host_port(host_h, 80);
 
   for (auto& f : runtime_.extractor.from_request(req, host)) {
@@ -205,10 +253,26 @@ void ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
     auto action = runtime_.policy.decide(result);
     if (action == core::Action::Block) runtime_.stats.inc_blocked();
 
-    runtime_.audit.write(audit::AuditEvent{core::now_iso8601(), client_addr, host, req.uri, req.method, false, f.filename,
-                                           f.bytes.size(), f.mime, sha, result.scanner_name,
-                                           policy::to_string(result.status), result.signature,
-                                           policy::to_string(action)});
+    audit::AuditEvent scan_event;
+    scan_event.event_type = "scan";
+    scan_event.timestamp = core::now_iso8601();
+    scan_event.client_addr = client_addr;
+    scan_event.host = host;
+    scan_event.url = req.uri;
+    scan_event.method = req.method;
+    scan_event.status_code = 0;
+    scan_event.bytes_in = bytes_in;
+    scan_event.filename = f.filename;
+    scan_event.file_size = f.bytes.size();
+    scan_event.mime = f.mime;
+    scan_event.sha256 = sha;
+    scan_event.scanner = result.scanner_name;
+    scan_event.result = policy::to_string(result.status);
+    scan_event.signature = result.signature;
+    scan_event.action = policy::to_string(action);
+    scan_event.rule_hit = result.signature;
+    scan_event.decision_source = "policy";
+    runtime_.audit.write(scan_event);
 
     if (action == core::Action::Block) {
       std::string body = "<html><body><h1>Blocked by OpenScanProxy</h1><p>Threat: " + result.signature + "</p></body></html>";
@@ -216,12 +280,19 @@ void ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
       os << "HTTP/1.1 403 Forbidden\r\nContent-Type: text/html\r\nContent-Length: " << body.size() << "\r\n\r\n" << body;
       auto r = os.str();
       send(cfd, r.data(), r.size(), 0);
+      auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+      runtime_.audit.write(make_access_event(core::now_iso8601(), client_addr, host, req.uri, req.method, 403, ms, bytes_in,
+                                             r.size(), false));
       return;
     }
   }
 
   int sfd = connect_host_port(host, port);
-  if (sfd < 0) return;
+  if (sfd < 0) {
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    runtime_.audit.write(make_access_event(core::now_iso8601(), client_addr, host, req.uri, req.method, 502, ms, bytes_in, 0, false));
+    return;
+  }
   send(sfd, raw.data(), raw.size(), 0);
 
   std::string upstream;
@@ -229,9 +300,12 @@ void ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
   auto n = recv(sfd, b, sizeof(b), 0);
   if (n > 0) upstream.assign(b, n);
   close(sfd);
+  std::size_t bytes_out = upstream.size();
+  int final_status = upstream.empty() ? 502 : 200;
 
   http::HttpResponse resp;
   if (http::parse_response(upstream, resp)) {
+    final_status = resp.status;
     for (auto& f : runtime_.extractor.from_response(req, resp, host)) {
       if (f.bytes.size() > runtime_.config.max_scan_file_size) continue;
       auto sha = core::sha256_hex(f.bytes);
@@ -250,16 +324,39 @@ void ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
         os << "HTTP/1.1 403 Forbidden\r\nContent-Type: text/html\r\nContent-Length: " << body.size() << "\r\n\r\n" << body;
         auto r = os.str();
         send(cfd, r.data(), r.size(), 0);
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+        runtime_.audit.write(make_access_event(core::now_iso8601(), client_addr, host, req.uri, req.method, 403, ms, bytes_in,
+                                               r.size(), false));
         return;
       }
-      runtime_.audit.write(audit::AuditEvent{core::now_iso8601(), client_addr, host, req.uri, req.method, false, f.filename,
-                                             f.bytes.size(), f.mime, sha, result.scanner_name,
-                                             policy::to_string(result.status), result.signature,
-                                             policy::to_string(action)});
+      audit::AuditEvent scan_event;
+      scan_event.event_type = "scan";
+      scan_event.timestamp = core::now_iso8601();
+      scan_event.client_addr = client_addr;
+      scan_event.host = host;
+      scan_event.url = req.uri;
+      scan_event.method = req.method;
+      scan_event.status_code = resp.status;
+      scan_event.bytes_in = bytes_in;
+      scan_event.bytes_out = bytes_out;
+      scan_event.filename = f.filename;
+      scan_event.file_size = f.bytes.size();
+      scan_event.mime = f.mime;
+      scan_event.sha256 = sha;
+      scan_event.scanner = result.scanner_name;
+      scan_event.result = policy::to_string(result.status);
+      scan_event.signature = result.signature;
+      scan_event.action = policy::to_string(action);
+      scan_event.rule_hit = result.signature;
+      scan_event.decision_source = "policy";
+      runtime_.audit.write(scan_event);
     }
   }
 
   send(cfd, upstream.data(), upstream.size(), 0);
+  auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+  runtime_.audit.write(
+      make_access_event(core::now_iso8601(), client_addr, host, req.uri, req.method, final_status, ms, bytes_in, bytes_out, false));
 }
 
 }  // namespace openscanproxy::proxy

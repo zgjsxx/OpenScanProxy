@@ -51,6 +51,16 @@ std::string get_header(const std::string& req, const std::string& key) {
   return req.substr(line_begin, line_end - line_begin);
 }
 
+int parse_int_or(const std::map<std::string, std::string>& q, const std::string& key, int fallback) {
+  auto it = q.find(key);
+  if (it == q.end()) return fallback;
+  try {
+    return std::stoi(it->second);
+  } catch (...) {
+    return fallback;
+  }
+}
+
 bool logged_in(const std::string& req) {
   auto cookie = get_header(req, "Cookie");
   return cookie.find("session=ok") != std::string::npos;
@@ -117,11 +127,18 @@ std::string logs_to_json(const std::vector<audit::AuditEvent>& logs) {
     const auto& e = logs[i];
     if (i) os << ',';
     os << "{";
+    os << "\"event_type\":\"" << core::json_escape(e.event_type) << "\",";
     os << "\"timestamp\":\"" << core::json_escape(e.timestamp) << "\",";
     os << "\"client_addr\":\"" << core::json_escape(e.client_addr) << "\",";
     os << "\"host\":\"" << core::json_escape(e.host) << "\",";
     os << "\"url\":\"" << core::json_escape(e.url) << "\",";
     os << "\"method\":\"" << core::json_escape(e.method) << "\",";
+    os << "\"status_code\":" << e.status_code << ",";
+    os << "\"latency_ms\":" << e.latency_ms << ",";
+    os << "\"bytes_in\":" << e.bytes_in << ",";
+    os << "\"bytes_out\":" << e.bytes_out << ",";
+    os << "\"rule_hit\":\"" << core::json_escape(e.rule_hit) << "\",";
+    os << "\"decision_source\":\"" << core::json_escape(e.decision_source) << "\",";
     os << "\"filename\":\"" << core::json_escape(e.filename) << "\",";
     os << "\"result\":\"" << core::json_escape(e.result) << "\",";
     os << "\"action\":\"" << core::json_escape(e.action) << "\",";
@@ -134,24 +151,42 @@ std::string logs_to_json(const std::vector<audit::AuditEvent>& logs) {
 
 std::vector<audit::AuditEvent> filter_logs(std::vector<audit::AuditEvent> logs, const std::map<std::string, std::string>& q) {
   int limit = 100;
-  if (auto it = q.find("limit"); it != q.end()) {
-    limit = std::max(1, std::min(1000, std::stoi(it->second)));
-  }
+  int offset = 0;
+  limit = std::max(1, std::min(1000, parse_int_or(q, "limit", limit)));
+  offset = std::max(0, parse_int_or(q, "offset", offset));
   const auto word = lower(q.count("q") ? q.at("q") : "");
   const auto act = lower(q.count("action") ? q.at("action") : "");
   const auto res = lower(q.count("result") ? q.at("result") : "");
   const auto host = lower(q.count("host") ? q.at("host") : "");
+  const auto method = lower(q.count("method") ? q.at("method") : "");
+  const auto path = lower(q.count("path") ? q.at("path") : "");
+  const auto event_type = lower(q.count("event_type") ? q.at("event_type") : "");
+  const int status = parse_int_or(q, "status", -1);
+  const auto time_from = q.count("time_from") ? q.at("time_from") : "";
+  const auto time_to = q.count("time_to") ? q.at("time_to") : "";
 
   std::vector<audit::AuditEvent> out;
-  for (auto it = logs.rbegin(); it != logs.rend() && static_cast<int>(out.size()) < limit; ++it) {
+  int skipped = 0;
+  for (auto it = logs.rbegin(); it != logs.rend(); ++it) {
     const auto& e = *it;
     const auto ehost = lower(e.host);
     const auto text = lower(e.url + " " + e.host + " " + e.filename + " " + e.signature);
     if (!act.empty() && lower(e.action) != act) continue;
     if (!res.empty() && lower(e.result) != res) continue;
+    if (!method.empty() && lower(e.method) != method) continue;
+    if (status >= 0 && e.status_code != status) continue;
+    if (!path.empty() && lower(e.url).find(path) == std::string::npos) continue;
     if (!host.empty() && ehost.find(host) == std::string::npos) continue;
+    if (!event_type.empty() && lower(e.event_type) != event_type) continue;
+    if (!time_from.empty() && e.timestamp < time_from) continue;
+    if (!time_to.empty() && e.timestamp > time_to) continue;
     if (!word.empty() && text.find(word) == std::string::npos) continue;
+    if (skipped < offset) {
+      ++skipped;
+      continue;
+    }
     out.push_back(e);
+    if (static_cast<int>(out.size()) >= limit) break;
   }
   std::reverse(out.begin(), out.end());
   return out;
