@@ -24,7 +24,13 @@ struct Runtime {
 
   explicit Runtime(config::AppConfig cfg)
       : config(std::move(cfg)),
-        policy(policy::PolicyConfig{config.policy_mode != "fail-close", config.suspicious_action == "block"}),
+        policy(policy::PolicyConfig{config.policy_mode != "fail-close",
+                                    config.suspicious_action == "block",
+                                    config.domain_whitelist,
+                                    config.domain_blacklist,
+                                    config.url_whitelist,
+                                    config.url_blacklist,
+                                    policy::access_action_from_string(config.default_access_action)}),
         audit(config.audit_log_path, config.audit_recent_limit) {}
 };
 

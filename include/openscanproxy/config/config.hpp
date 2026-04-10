@@ -22,6 +22,11 @@ struct AppConfig {
   std::size_t max_scan_file_size{5 * 1024 * 1024};
   std::vector<std::string> allowed_mime;
   std::vector<std::string> allowed_extensions;
+  std::vector<std::string> domain_whitelist;
+  std::vector<std::string> domain_blacklist;
+  std::vector<std::string> url_whitelist;
+  std::vector<std::string> url_blacklist;
+  std::string default_access_action{"allow"};
 
   std::uint64_t scan_timeout_ms{5000};
   std::string policy_mode{"fail-open"};

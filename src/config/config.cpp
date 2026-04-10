@@ -57,6 +57,7 @@ AppConfig ConfigLoader::load_from_file(const std::string& path) {
   GET_U64("scan_timeout_ms", scan_timeout_ms);
   GET_S("policy_mode", policy_mode);
   GET_S("suspicious_action", suspicious_action);
+  GET_S("default_access_action", default_access_action);
   GET_S("scanner_type", scanner_type);
   GET_S("clamav_mode", clamav_mode);
   GET_S("clamav_unix_socket", clamav_unix_socket);
@@ -69,6 +70,13 @@ AppConfig ConfigLoader::load_from_file(const std::string& path) {
 
   cfg.allowed_mime = parse_string_array(text, "allowed_mime");
   cfg.allowed_extensions = parse_string_array(text, "allowed_extensions");
+  cfg.domain_whitelist = parse_string_array(text, "domain_whitelist");
+  cfg.domain_blacklist = parse_string_array(text, "domain_blacklist");
+  cfg.url_whitelist = parse_string_array(text, "url_whitelist");
+  cfg.url_blacklist = parse_string_array(text, "url_blacklist");
+  if (cfg.default_access_action != "allow" && cfg.default_access_action != "block") {
+    cfg.default_access_action = "allow";
+  }
   return cfg;
 }
 
