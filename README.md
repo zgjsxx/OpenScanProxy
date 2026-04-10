@@ -26,7 +26,7 @@ OpenScanProxy 是一个面向安全网关场景的开源 C++ MVP 项目：它实
 
 为了符合“少依赖、强边界、可维护”的原则：
 - 不引入 Boost/Poco/大型 Web 框架
-- 管理后台直接用轻量 socket + 服务器端 HTML
+- 管理后台后端仅提供 API + 静态资源托管，前端使用 Vue 3 + Vite 单独构建
 - 配置采用 MVP 级 JSON 解析器（仅覆盖当前 schema）
 
 ## 项目结构
@@ -62,6 +62,10 @@ OpenScanProxy/
 ├── docker/
 │   ├── Dockerfile
 │   └── docker-compose.yml
+├── web/
+│   ├── src/
+│   ├── package.json
+│   └── vite.config.js
 └── CMakeLists.txt
 ```
 
@@ -136,12 +140,42 @@ sudo systemctl start clamav-daemon
 
 ## 管理后台功能
 
-- `/login`：基础登录（配置文件用户名/密码）
-- `/`：仪表盘
-- `/logs`：审计日志视图
-- `/config`：当前生效配置（只读）
-- `/healthz` `/readyz`
-- `/metrics`
+- 前端路由：`/login`、`/dashboard`、`/logs`、`/policy`
+- API：`/api/stats`、`/api/logs`、`/api/policy`、`/api/config`
+- 认证：`/api/login`、`/api/logout`（Cookie Session）
+- 健康检查：`/healthz` `/readyz`
+- 指标：`/metrics`
+
+### 前端开发与发布（可复现）
+
+1. 安装依赖：
+
+```bash
+cd web
+npm install
+```
+
+2. 开发模式（Vite dev server）：
+
+```bash
+cd web
+npm run dev
+```
+
+3. 生产构建（输出到 `web/dist`）：
+
+```bash
+cd web
+npm run build
+```
+
+4. 启动 OpenScanProxy（生产模式读取静态资源）：
+
+```bash
+./build/openscanproxy configs/config.json
+```
+
+默认读取 `admin_static_dir`（示例值：`./web/dist`）。可在 `configs/config.json` 中修改部署目录。
 
 ## 已知限制（MVP）
 - HTTPS MITM 尚未接入解密后 HTTP 级扫描（当前仅做 TLS 终止与转发）

@@ -47,6 +47,7 @@ AppConfig ConfigLoader::load_from_file(const std::string& path) {
   GET_U16("proxy_listen_port", proxy_listen_port);
   GET_S("admin_listen_host", admin_listen_host);
   GET_U16("admin_listen_port", admin_listen_port);
+  GET_S("admin_static_dir", admin_static_dir);
   GET_S("ca_cert_path", ca_cert_path);
   GET_S("ca_key_path", ca_key_path);
   GET_B("enable_https_mitm", enable_https_mitm);
