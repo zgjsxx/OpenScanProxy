@@ -7,7 +7,7 @@ OpenScanProxy 是一个面向安全网关场景的开源 C++ MVP 项目：它实
 ## 核心功能
 
 - HTTP 正向代理（基础转发）
-- HTTPS CONNECT 隧道（支持基础 MITM 终止与转发）
+- HTTPS CONNECT 隧道（支持基础 MITM：按域名签发叶子证书并转发）
 - 文件识别与提取（上传/下载，完整缓冲模式）
 - 扫描器抽象接口（已实现 MockScanner + ClamAVScanner）
 - 策略执行（clean/infected/suspicious/error）
@@ -74,7 +74,7 @@ OpenScanProxy/
 - **audit**：结构化审计日志
 - **admin**：管理 HTTP 服务与页面
 - **stats**：运行时计数与 metrics 输出
-- **tlsmitm**：MITM 引擎（证书加载，支持基础 TLS 终止/转发）
+- **tlsmitm**：MITM 引擎（CA 加载、按域名签发叶子证书、TLS 终止/转发）
 
 ## 快速开始
 
@@ -144,8 +144,7 @@ sudo systemctl start clamav-daemon
 - `/metrics`
 
 ## 已知限制（MVP）
-
-- HTTPS MITM 当前使用静态证书（未实现按域名动态签发叶子证书），浏览器会看到统一代理证书
+- HTTPS MITM 尚未接入解密后 HTTP 级扫描（当前仅做 TLS 终止与转发）
 - HTTP 解析器为简化实现，不覆盖分块传输、连接复用等完整协议边界
 - 配置 JSON 解析器仅覆盖当前 schema
 - 无流式扫描、无异步队列

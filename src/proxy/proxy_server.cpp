@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <thread>
@@ -126,7 +127,13 @@ void ProxyServer::handle_connect_tunnel(int cfd, const std::string& target, cons
 }
 
 void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host) {
-  SSL* client_ssl = SSL_new(runtime_.tls_mitm.client_ctx());
+  std::unique_ptr<SSL_CTX, void (*)(SSL_CTX*)> host_ctx(runtime_.tls_mitm.create_server_ctx_for_host(host), SSL_CTX_free);
+  if (!host_ctx) {
+    close(sfd);
+    return;
+  }
+
+  SSL* client_ssl = SSL_new(host_ctx.get());
   SSL* upstream_ssl = SSL_new(runtime_.tls_mitm.upstream_ctx());
   if (!client_ssl || !upstream_ssl) {
     if (client_ssl) SSL_free(client_ssl);
