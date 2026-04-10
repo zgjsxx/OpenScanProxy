@@ -2,6 +2,7 @@
 
 #include "openscanproxy/core/types.hpp"
 
+#include <mutex>
 #include <string>
 
 namespace openscanproxy::policy {
@@ -15,8 +16,11 @@ class PolicyEngine {
  public:
   explicit PolicyEngine(PolicyConfig cfg) : cfg_(cfg) {}
   core::Action decide(const core::ScanResult& result) const;
+  PolicyConfig config() const;
+  void update(PolicyConfig cfg);
 
  private:
+  mutable std::mutex mu_;
   PolicyConfig cfg_;
 };
 

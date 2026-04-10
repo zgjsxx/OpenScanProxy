@@ -3,17 +3,28 @@
 namespace openscanproxy::policy {
 
 core::Action PolicyEngine::decide(const core::ScanResult& result) const {
+  auto cfg = config();
   switch (result.status) {
     case core::ScanStatus::Clean:
       return core::Action::Allow;
     case core::ScanStatus::Infected:
       return core::Action::Block;
     case core::ScanStatus::Suspicious:
-      return cfg_.block_suspicious ? core::Action::Block : core::Action::LogOnly;
+      return cfg.block_suspicious ? core::Action::Block : core::Action::LogOnly;
     case core::ScanStatus::Error:
-      return cfg_.fail_open ? core::Action::Allow : core::Action::Block;
+      return cfg.fail_open ? core::Action::Allow : core::Action::Block;
   }
   return core::Action::Block;
+}
+
+PolicyConfig PolicyEngine::config() const {
+  std::lock_guard<std::mutex> lk(mu_);
+  return cfg_;
+}
+
+void PolicyEngine::update(PolicyConfig cfg) {
+  std::lock_guard<std::mutex> lk(mu_);
+  cfg_ = cfg;
 }
 
 std::string to_string(core::ScanStatus status) {
