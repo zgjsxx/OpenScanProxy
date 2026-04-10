@@ -286,11 +286,7 @@ void AdminServer::run() {
         runtime_.config.suspicious_action = p.block_suspicious ? "block" : "log";
         resp = http_resp(200, "OK", "{\"ok\":true}", "application/json");
       } else {
-        if (!logged_in(req) && pure_path != "/login") {
-          resp = http_resp(302, "Found", "", "text/plain", "Location: /login\r\n");
-        } else {
-          resp = serve_static(runtime_.config.admin_static_dir, pure_path == "/login" ? "/index.html" : pure_path);
-        }
+        resp = serve_static(runtime_.config.admin_static_dir, pure_path == "/login" ? "/index.html" : pure_path);
       }
       send(c, resp.data(), resp.size(), 0);
       close(c);
