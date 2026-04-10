@@ -34,6 +34,7 @@ struct AppConfig {
   uint16_t clamav_port{3310};
 
   std::string audit_log_path{"./logs/audit.jsonl"};
+  std::size_t audit_recent_limit{500};
   std::string admin_user{"admin"};
   std::string admin_password{"admin123"};
 };

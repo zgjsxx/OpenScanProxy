@@ -21,6 +21,7 @@
   "clamav_host": "127.0.0.1",
   "clamav_port": 3310,
   "audit_log_path": "./logs/audit.jsonl",
+  "audit_recent_limit": 500,
   "admin_user": "admin",
   "admin_password": "admin123"
 }

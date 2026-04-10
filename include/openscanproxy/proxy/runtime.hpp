@@ -25,7 +25,7 @@ struct Runtime {
   explicit Runtime(config::AppConfig cfg)
       : config(std::move(cfg)),
         policy(policy::PolicyConfig{config.policy_mode != "fail-close", config.suspicious_action == "block"}),
-        audit(config.audit_log_path) {}
+        audit(config.audit_log_path, config.audit_recent_limit) {}
 };
 
 }  // namespace openscanproxy::proxy
