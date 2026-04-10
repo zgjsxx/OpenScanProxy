@@ -144,7 +144,6 @@ sudo systemctl start clamav-daemon
 - `/metrics`
 
 ## 已知限制（MVP）
-
 - HTTPS MITM 尚未接入解密后 HTTP 级扫描（当前仅做 TLS 终止与转发）
 - HTTP 解析器为简化实现，不覆盖分块传输、连接复用等完整协议边界
 - 配置 JSON 解析器仅覆盖当前 schema
