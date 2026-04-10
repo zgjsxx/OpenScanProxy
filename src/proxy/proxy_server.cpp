@@ -77,6 +77,13 @@ audit::AuditEvent make_access_event(const std::string& timestamp, const std::str
   return event;
 }
 
+std::string make_forbidden_response(const std::string& message) {
+  std::string body = "<html><body><h1>403 Forbidden</h1><p>" + message + "</p></body></html>";
+  std::ostringstream os;
+  os << "HTTP/1.1 403 Forbidden\r\nContent-Type: text/html\r\nContent-Length: " << body.size() << "\r\n\r\n" << body;
+  return os.str();
+}
+
 }  // namespace
 
 void ProxyServer::run() {
@@ -138,6 +145,20 @@ void ProxyServer::handle_client(int cfd, const std::string& client_addr) {
 void ProxyServer::handle_connect_tunnel(int cfd, const std::string& target, const std::string& client_addr) {
   auto start = std::chrono::steady_clock::now();
   auto [host, port] = split_host_port(target, 443);
+  auto access = runtime_.policy.evaluate_access(host, target, "CONNECT");
+  if (access.action == policy::AccessAction::Block) {
+    auto r = make_forbidden_response("Blocked by access policy");
+    send(cfd, r.data(), r.size(), 0);
+    runtime_.stats.inc_blocked();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    auto event = make_access_event(core::now_iso8601(), client_addr, host, target, "CONNECT", 403, ms, 0, r.size(), false);
+    event.action = "block";
+    event.rule_hit = access.matched_rule;
+    event.decision_source = access.matched_type;
+    runtime_.audit.write(event);
+    return;
+  }
+
   int sfd = connect_host_port(host, port);
   if (sfd < 0) {
     std::string fail = "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 11\r\n\r\nbad gateway";
@@ -239,6 +260,20 @@ void ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
     return;
   }
   auto [host, port] = split_host_port(host_h, 80);
+  auto access = runtime_.policy.evaluate_access(host, req.uri, req.method);
+  if (access.action == policy::AccessAction::Block) {
+    auto r = make_forbidden_response("Blocked by access policy");
+    send(cfd, r.data(), r.size(), 0);
+    runtime_.stats.inc_blocked();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    auto event =
+        make_access_event(core::now_iso8601(), client_addr, host, req.uri, req.method, 403, ms, bytes_in, r.size(), false);
+    event.action = "block";
+    event.rule_hit = access.matched_rule;
+    event.decision_source = access.matched_type;
+    runtime_.audit.write(event);
+    return;
+  }
 
   for (auto& f : runtime_.extractor.from_request(req, host)) {
     if (f.bytes.size() > runtime_.config.max_scan_file_size) continue;

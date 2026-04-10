@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <regex>
 #include <sstream>
 #include <thread>
 
@@ -38,6 +39,28 @@ std::string get_body(const std::string& req) {
   auto pos = req.find("\r\n\r\n");
   if (pos == std::string::npos) return "";
   return req.substr(pos + 4);
+}
+
+std::vector<std::string> parse_string_array(const std::string& text, const std::string& key) {
+  std::regex arr("\\\"" + key + "\\\"\\s*:\\s*\\[(.*?)\\]", std::regex::icase);
+  std::smatch m;
+  if (!std::regex_search(text, m, arr)) return {};
+  std::vector<std::string> out;
+  std::regex item("\\\"([^\\\"]*)\\\"");
+  for (std::sregex_iterator it(m[1].first, m[1].second, item), end; it != end; ++it) out.push_back((*it)[1].str());
+  return out;
+}
+
+std::string json_array(const std::vector<std::string>& values, bool lower_case = false) {
+  std::ostringstream os;
+  os << "[";
+  for (std::size_t i = 0; i < values.size(); ++i) {
+    if (i) os << ",";
+    auto v = lower_case ? lower(values[i]) : values[i];
+    os << "\"" << core::json_escape(v) << "\"";
+  }
+  os << "]";
+  return os.str();
 }
 
 std::string get_header(const std::string& req, const std::string& key) {
@@ -116,6 +139,19 @@ std::string config_to_json(const proxy::Runtime& runtime) {
   os << "\"scanner\":\"" << core::json_escape(c.scanner_type) << "\",";
   os << "\"policy_mode\":\"" << (p.fail_open ? "fail-open" : "fail-close") << "\",";
   os << "\"suspicious_action\":\"" << (p.block_suspicious ? "block" : "log") << "\"";
+  os << "}";
+  return os.str();
+}
+
+std::string access_policy_to_json(const proxy::Runtime& runtime) {
+  auto p = runtime.policy.config();
+  std::ostringstream os;
+  os << "{";
+  os << "\"domain_whitelist\":" << json_array(p.domain_whitelist, true) << ",";
+  os << "\"domain_blacklist\":" << json_array(p.domain_blacklist, true) << ",";
+  os << "\"url_whitelist\":" << json_array(p.url_whitelist) << ",";
+  os << "\"url_blacklist\":" << json_array(p.url_blacklist) << ",";
+  os << "\"default_access_action\":\"" << policy::to_string(p.default_access_action) << "\"";
   os << "}";
   return os.str();
 }
@@ -320,6 +356,46 @@ void AdminServer::run() {
         runtime_.config.policy_mode = p.fail_open ? "fail-open" : "fail-close";
         runtime_.config.suspicious_action = p.block_suspicious ? "block" : "log";
         resp = http_resp(200, "OK", "{\"ok\":true}", "application/json");
+      } else if (pure_path == "/api/access-policy" && method == "GET") {
+        resp = http_resp(200, "OK", access_policy_to_json(runtime_), "application/json");
+      } else if (pure_path == "/api/access-policy" && method == "POST") {
+        auto body = get_body(req);
+        auto kv = core::parse_simple_json_object(body);
+        auto p = runtime_.policy.config();
+        p.domain_whitelist = parse_string_array(body, "domain_whitelist");
+        p.domain_blacklist = parse_string_array(body, "domain_blacklist");
+        p.url_whitelist = parse_string_array(body, "url_whitelist");
+        p.url_blacklist = parse_string_array(body, "url_blacklist");
+        for (auto& d : p.domain_whitelist) d = lower(core::trim(d));
+        for (auto& d : p.domain_blacklist) d = lower(core::trim(d));
+        if (kv.count("default_access_action")) {
+          p.default_access_action = policy::access_action_from_string(kv["default_access_action"]);
+        }
+        runtime_.policy.update(p);
+        runtime_.config.domain_whitelist = p.domain_whitelist;
+        runtime_.config.domain_blacklist = p.domain_blacklist;
+        runtime_.config.url_whitelist = p.url_whitelist;
+        runtime_.config.url_blacklist = p.url_blacklist;
+        runtime_.config.default_access_action = policy::to_string(p.default_access_action);
+        resp = http_resp(200, "OK", access_policy_to_json(runtime_), "application/json");
+      } else if (pure_path == "/api/policy/test" && method == "POST") {
+        auto body = get_body(req);
+        auto kv = core::parse_simple_json_object(body);
+        auto host = kv.count("host") ? kv.at("host") : "";
+        auto url = kv.count("url") ? kv.at("url") : "";
+        auto req_method = kv.count("method") ? kv.at("method") : "GET";
+        auto r = runtime_.policy.evaluate_access(host, url, req_method);
+        std::ostringstream out;
+        out << "{";
+        out << "\"host\":\"" << core::json_escape(host) << "\",";
+        out << "\"url\":\"" << core::json_escape(url) << "\",";
+        out << "\"method\":\"" << core::json_escape(req_method) << "\",";
+        out << "\"matched_rule\":\"" << core::json_escape(r.matched_rule) << "\",";
+        out << "\"matched_type\":\"" << core::json_escape(r.matched_type) << "\",";
+        out << "\"reason\":\"" << core::json_escape(r.reason) << "\",";
+        out << "\"action\":\"" << policy::to_string(r.action) << "\"";
+        out << "}";
+        resp = http_resp(200, "OK", out.str(), "application/json");
       } else {
         resp = serve_static(runtime_.config.admin_static_dir, pure_path == "/login" ? "/index.html" : pure_path);
       }
