@@ -3,6 +3,7 @@
   "proxy_listen_port": 8080,
   "admin_listen_host": "127.0.0.1",
   "admin_listen_port": 9090,
+  "admin_static_dir": "./web/dist",
   "ca_cert_path": "./certs/ca.crt",
   "ca_key_path": "./certs/ca.key",
   "enable_https_mitm": false,

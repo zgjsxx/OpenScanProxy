@@ -25,3 +25,6 @@ add_executable(openscanproxy
 
 target_include_directories(openscanproxy PRIVATE include)
 target_link_libraries(openscanproxy PRIVATE OpenSSL::SSL OpenSSL::Crypto pthread)
+
+set(ADMIN_STATIC_DIR_DEFAULT "${CMAKE_SOURCE_DIR}/web/dist" CACHE PATH "Default admin static asset directory")
+message(STATUS "Admin static assets directory: ${ADMIN_STATIC_DIR_DEFAULT}")

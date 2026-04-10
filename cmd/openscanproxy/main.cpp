@@ -22,6 +22,8 @@ int main(int argc, char** argv) {
       runtime.scanner = scanner::create_mock_scanner();
     }
 
+    std::cout << "admin static dir: " << cfg.admin_static_dir << std::endl;
+
     if (cfg.enable_https_mitm) {
       if (!runtime.tls_mitm.initialize(cfg.ca_cert_path, cfg.ca_key_path)) {
         std::cerr << "failed to initialize TLS MITM engine" << std::endl;
