@@ -5,10 +5,12 @@
 
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <openssl/ssl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include <cstring>
+#include <mutex>
 #include <sstream>
 #include <thread>
 
@@ -120,9 +122,58 @@ void ProxyServer::handle_connect_tunnel(int cfd, const std::string& target, cons
   }
 
   runtime_.stats.inc_https_mitm_requests();
-  // MVP fallback: currently keep tunnel mode after CONNECT handshake.
-  // TODO: full TLS MITM handshake on both sides and HTTP inspection in decrypted channel.
-  relay_bidirectional(cfd, sfd);
+  handle_connect_mitm(cfd, sfd, host);
+}
+
+void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host) {
+  SSL* client_ssl = SSL_new(runtime_.tls_mitm.client_ctx());
+  SSL* upstream_ssl = SSL_new(runtime_.tls_mitm.upstream_ctx());
+  if (!client_ssl || !upstream_ssl) {
+    if (client_ssl) SSL_free(client_ssl);
+    if (upstream_ssl) SSL_free(upstream_ssl);
+    close(sfd);
+    return;
+  }
+
+  SSL_set_fd(client_ssl, cfd);
+  SSL_set_fd(upstream_ssl, sfd);
+  SSL_set_tlsext_host_name(upstream_ssl, host.c_str());
+
+  if (SSL_accept(client_ssl) != 1 || SSL_connect(upstream_ssl) != 1) {
+    SSL_shutdown(client_ssl);
+    SSL_shutdown(upstream_ssl);
+    SSL_free(client_ssl);
+    SSL_free(upstream_ssl);
+    close(sfd);
+    return;
+  }
+
+  std::mutex write_lock_client;
+  std::mutex write_lock_upstream;
+  auto relay_tls = [&](SSL* from, SSL* to, std::mutex& write_lock) {
+    char buf[8192];
+    while (true) {
+      int n = SSL_read(from, buf, sizeof(buf));
+      if (n <= 0) break;
+      int off = 0;
+      while (off < n) {
+        std::lock_guard<std::mutex> g(write_lock);
+        int w = SSL_write(to, buf + off, n - off);
+        if (w <= 0) return;
+        off += w;
+      }
+    }
+  };
+
+  std::thread t1(relay_tls, client_ssl, upstream_ssl, std::ref(write_lock_upstream));
+  std::thread t2(relay_tls, upstream_ssl, client_ssl, std::ref(write_lock_client));
+  t1.join();
+  t2.join();
+
+  SSL_shutdown(client_ssl);
+  SSL_shutdown(upstream_ssl);
+  SSL_free(client_ssl);
+  SSL_free(upstream_ssl);
   close(sfd);
 }
 
