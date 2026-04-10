@@ -11,6 +11,7 @@ struct AppConfig {
   uint16_t proxy_listen_port{8080};
   std::string admin_listen_host{"127.0.0.1"};
   uint16_t admin_listen_port{9090};
+  std::string admin_static_dir{"./web/dist"};
 
   std::string ca_cert_path{"./certs/ca.crt"};
   std::string ca_key_path{"./certs/ca.key"};
