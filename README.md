@@ -128,6 +128,24 @@ openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
 - `ca_key_path`
 - `enable_https_mitm`
 
+## 域名分类数据（支持开源数据导入）
+
+`URL分类` 现在支持从 CSV 载入域名分类库：
+
+- 配置项：`domain_category_data_file`（默认 `./configs/domain_categories.csv`）
+- 格式：每行 `domain,category`，支持 `#` 注释
+- 匹配：优先精确域名，未命中时按后缀域名回退（例如 `a.b.example.com` 可命中 `example.com`）
+
+你可以直接替换该 CSV 为更大规模的开源域名分类数据（如社区维护的分类域名清单），系统启动时会自动加载。
+
+也可以使用内置脚本自动下载并生成更大规模的数据集（默认来源：`blocklistproject/Lists` 开源清单）：
+
+```bash
+python3 scripts/download_domain_categories.py --output configs/domain_categories.csv
+```
+
+下载完成后重启服务即可生效。
+
 ## 系统/浏览器信任 CA
 
 将 `certs/ca.crt` 导入系统或浏览器受信任根证书（不同系统命令不同）。

@@ -215,6 +215,13 @@ bool base64_decode(const std::string& input, std::string& out) {
   return true;
 }
 
+std::string sanitize_identity(std::string value) {
+  value.erase(std::remove_if(value.begin(), value.end(), [](unsigned char c) {
+    return c < 0x20 || c == 0x7f;
+  }), value.end());
+  return core::trim(value);
+}
+
 std::string authenticate_proxy_request(const ProxyAuthStore& auth_store, const std::map<std::string, std::string>& headers) {
   if (!auth_store.enabled()) return "";
   auto auth = http::header_get(headers, "Proxy-Authorization");
@@ -225,8 +232,9 @@ std::string authenticate_proxy_request(const ProxyAuthStore& auth_store, const s
   if (!base64_decode(auth.substr(std::strlen(prefix)), decoded)) return "";
   auto pos = decoded.find(':');
   if (pos == std::string::npos) return "";
-  auto user = decoded.substr(0, pos);
+  auto user = sanitize_identity(decoded.substr(0, pos));
   auto password = decoded.substr(pos + 1);
+  if (user.empty()) return "";
   if (!auth_store.authenticate(user, password)) return "";
   return user;
 }

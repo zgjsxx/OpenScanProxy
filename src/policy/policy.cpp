@@ -2,8 +2,14 @@
 
 #include "openscanproxy/core/util.hpp"
 
+#include <fstream>
+#include <unordered_map>
+
 namespace openscanproxy::policy {
 namespace {
+
+std::mutex g_category_mu;
+std::unordered_map<std::string, std::string> g_domain_categories;
 
 bool wildcard_match_impl(const std::string& value, const std::string& pattern, std::size_t vi, std::size_t pi) {
   if (pi == pattern.size()) return vi == value.size();
@@ -46,22 +52,63 @@ bool contains_any(const std::string& text, const std::vector<std::string>& needl
   return false;
 }
 
+std::string classify_by_domain_data(const std::string& host_l) {
+  if (host_l.empty()) return "";
+  std::lock_guard<std::mutex> lk(g_category_mu);
+  auto exact = g_domain_categories.find(host_l);
+  if (exact != g_domain_categories.end()) return exact->second;
+
+  auto dot = host_l.find('.');
+  while (dot != std::string::npos) {
+    auto suffix = host_l.substr(dot + 1);
+    auto it = g_domain_categories.find(suffix);
+    if (it != g_domain_categories.end()) return it->second;
+    dot = host_l.find('.', dot + 1);
+  }
+  return "";
+}
+
 }  // namespace
+
+bool load_domain_categories_from_csv(const std::string& path) {
+  std::ifstream ifs(path);
+  if (!ifs) return false;
+
+  std::unordered_map<std::string, std::string> loaded;
+  std::string line;
+  while (std::getline(ifs, line)) {
+    auto text = core::trim(line);
+    if (text.empty() || text[0] == '#') continue;
+    auto comma = text.find(',');
+    if (comma == std::string::npos) continue;
+    auto domain = core::to_lower(core::trim(text.substr(0, comma)));
+    auto category = core::to_lower(core::trim(text.substr(comma + 1)));
+    if (domain.empty() || category.empty()) continue;
+    loaded[domain] = category;
+  }
+
+  std::lock_guard<std::mutex> lk(g_category_mu);
+  g_domain_categories = std::move(loaded);
+  return true;
+}
 
 std::string classify_url(const std::string& host, const std::string& url) {
   const auto host_l = core::to_lower(host);
   const auto url_l = core::to_lower(url);
   const auto text = host_l + " " + url_l;
 
+  if (auto domain_category = classify_by_domain_data(host_l); !domain_category.empty()) return domain_category;
+
   if (contains_any(text, {"porn", "adult", "sex", "xvideos", "xnxx", "onlyfans"})) return "adult";
   if (contains_any(text, {"casino", "bet", "gambl", "poker", "lottery", "slot"})) return "gambling";
   if (contains_any(text, {"facebook", "twitter", "x.com", "instagram", "tiktok", "weibo", "reddit"})) return "social";
-  if (contains_any(text, {"youtube", "netflix", "bilibili", "twitch", "spotify", "douyin"})) return "video";
+  if (contains_any(text, {"youtube", "netflix", "bilibili", "twitch", "spotify", "douyin", "youku", "iqiyi", "qq.com/video"})) return "video";
   if (contains_any(text, {"github", "gitlab", "bitbucket", "npmjs", "pypi", "docker"})) return "developer";
-  if (contains_any(text, {"drive.google.com", "dropbox", "onedrive", "box.com", "mega.nz"})) return "cloud_storage";
-  if (contains_any(text, {"amazon", "taobao", "tmall", "ebay", "jd.com", "shop"})) return "shopping";
-  if (contains_any(text, {"bank", "pay", "wallet", "finance", "alipay", "paypal"})) return "finance";
-  if (contains_any(text, {"news", "cnn", "bbc", "reuters", "nytimes"})) return "news";
+  if (contains_any(text, {"drive.google.com", "dropbox", "onedrive", "box.com", "mega.nz", "aliyundrive"})) return "cloud_storage";
+  if (contains_any(text, {"amazon", "taobao", "tmall", "ebay", "jd.com", "shop", "1688", "alicdn", "alibaba"})) return "shopping";
+  if (contains_any(text, {"bank", "pay", "wallet", "finance", "alipay", "paypal", "tenpay"})) return "finance";
+  if (contains_any(text, {"news", "cnn", "bbc", "reuters", "nytimes", "toutiao", "thepaper"})) return "news";
+  if (contains_any(text, {"baidu", "bing", "google", "sogou", "so.com", "duckduckgo"})) return "search";
   return "other";
 }
 
