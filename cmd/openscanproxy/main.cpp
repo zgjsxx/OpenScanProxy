@@ -4,6 +4,7 @@
 #include "openscanproxy/scanner/scanner.hpp"
 
 #include <iostream>
+#include <csignal>
 #include <thread>
 
 using namespace openscanproxy;
@@ -12,6 +13,7 @@ int main(int argc, char** argv) {
   std::string config_path = argc > 1 ? argv[1] : "configs/config.json";
 
   try {
+    std::signal(SIGPIPE, SIG_IGN);
     auto cfg = config::ConfigLoader::load_from_file(config_path);
     proxy::Runtime runtime(cfg);
 

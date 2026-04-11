@@ -18,6 +18,7 @@
 #include <sstream>
 #include <thread>
 #include <vector>
+#include <iostream>
 
 namespace openscanproxy::proxy {
 namespace {
@@ -295,14 +296,27 @@ bool ssl_read_http_message(SSL* ssl, std::string& pending, std::string& raw_mess
 
 void ProxyServer::run() {
   int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) {
+    std::cerr << "proxy: socket() failed" << std::endl;
+    return;
+  }
   int one = 1;
   setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
   addr.sin_port = htons(runtime_.config.proxy_listen_port);
   inet_pton(AF_INET, runtime_.config.proxy_listen_host.c_str(), &addr.sin_addr);
-  bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-  listen(fd, 128);
+  if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+    std::cerr << "proxy: bind() failed on " << runtime_.config.proxy_listen_host << ":" << runtime_.config.proxy_listen_port << std::endl;
+    close(fd);
+    return;
+  }
+  if (listen(fd, 128) != 0) {
+    std::cerr << "proxy: listen() failed" << std::endl;
+    close(fd);
+    return;
+  }
+  std::cout << "proxy listening on " << runtime_.config.proxy_listen_host << ":" << runtime_.config.proxy_listen_port << std::endl;
 
   while (true) {
     sockaddr_in caddr{};
@@ -312,7 +326,17 @@ void ProxyServer::run() {
     char ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &caddr.sin_addr, ip, sizeof(ip));
     std::string client_addr = std::string(ip) + ":" + std::to_string(ntohs(caddr.sin_port));
-    std::thread(&ProxyServer::handle_client, this, cfd, client_addr).detach();
+    std::thread([this, cfd, client_addr]() {
+      try {
+        handle_client(cfd, client_addr);
+      } catch (const std::exception& ex) {
+        std::cerr << "proxy: unhandled client error from " << client_addr << ": " << ex.what() << std::endl;
+        close(cfd);
+      } catch (...) {
+        std::cerr << "proxy: unknown client error from " << client_addr << std::endl;
+        close(cfd);
+      }
+    }).detach();
   }
 }
 
