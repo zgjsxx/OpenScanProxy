@@ -92,10 +92,47 @@ std::string make_proxy_auth_required_response() {
   return os.str();
 }
 
-std::string make_forbidden_response(const std::string& message) {
-  std::string body = "<html><body><h1>403 Forbidden</h1><p>" + message + "</p></body></html>";
+std::string html_escape(const std::string& in) {
+  std::string out;
+  out.reserve(in.size());
+  for (char c : in) {
+    switch (c) {
+      case '&': out += "&amp;"; break;
+      case '<': out += "&lt;"; break;
+      case '>': out += "&gt;"; break;
+      case '"': out += "&quot;"; break;
+      case '\'': out += "&#39;"; break;
+      default: out.push_back(c); break;
+    }
+  }
+  return out;
+}
+
+std::string make_block_notification_response(const std::string& reason) {
+  auto escaped_reason = html_escape(reason.empty() ? "Blocked by access policy" : reason);
+  std::ostringstream body;
+  body << "<!doctype html><html><head><meta charset=\"utf-8\">"
+       << "<title>Access Blocked</title>"
+       << "<style>"
+       << "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;"
+       << "margin:0;background:#f6f8fb;color:#1e293b;display:flex;justify-content:center;align-items:center;min-height:100vh;}"
+       << ".card{max-width:680px;background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:28px;"
+       << "box-shadow:0 10px 30px rgba(15,23,42,.08);}"
+       << "h1{margin:0 0 8px;color:#b91c1c;font-size:28px;}h2{margin:0 0 14px;font-size:18px;color:#334155;}"
+       << ".reason{padding:12px 14px;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;color:#991b1b;}"
+       << ".hint{margin-top:12px;color:#64748b;font-size:14px;}"
+       << "</style></head><body><div class=\"card\"><h1>403 Access Blocked</h1>"
+       << "<h2>OpenScanProxy 拦截了当前请求</h2>"
+       << "<div class=\"reason\"><strong>Reason:</strong> " << escaped_reason << "</div>"
+       << "<div class=\"hint\">如果你认为这是误拦截，请联系管理员并提供该页面截图。</div>"
+       << "</div></body></html>";
+  auto body_s = body.str();
   std::ostringstream os;
-  os << "HTTP/1.1 403 Forbidden\r\nContent-Type: text/html\r\nContent-Length: " << body.size() << "\r\n\r\n" << body;
+  os << "HTTP/1.1 403 Forbidden\r\n"
+     << "Content-Type: text/html; charset=utf-8\r\n"
+     << "Cache-Control: no-store\r\n"
+     << "Content-Length: " << body_s.size() << "\r\n\r\n"
+     << body_s;
   return os.str();
 }
 
@@ -307,7 +344,7 @@ void ProxyServer::handle_connect_tunnel(int cfd, const std::string& target, cons
   auto [host, port] = split_host_port(target, 443);
   auto access = runtime_.policy.evaluate_access(host, target, "CONNECT", user);
   if (access.action == policy::AccessAction::Block) {
-    auto r = make_forbidden_response("Blocked by access policy");
+    auto r = make_block_notification_response(access.reason);
     send(cfd, r.data(), r.size(), 0);
     runtime_.stats.inc_blocked();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
@@ -422,7 +459,7 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
   auto [host, port] = split_host_port(host_h, 80);
   auto access = runtime_.policy.evaluate_access(host, req.uri, req.method, user);
   if (access.action == policy::AccessAction::Block) {
-    auto r = make_forbidden_response("Blocked by access policy");
+    auto r = make_block_notification_response(access.reason);
     send(cfd, r.data(), r.size(), 0);
     runtime_.stats.inc_blocked();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
@@ -471,10 +508,7 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
     runtime_.audit.write(scan_event);
 
     if (action == core::Action::Block) {
-      std::string body = "<html><body><h1>Blocked by OpenScanProxy</h1><p>Threat: " + result.signature + "</p></body></html>";
-      std::ostringstream os;
-      os << "HTTP/1.1 403 Forbidden\r\nContent-Type: text/html\r\nContent-Length: " << body.size() << "\r\n\r\n" << body;
-      auto r = os.str();
+      auto r = make_block_notification_response("Threat detected: " + result.signature);
       send(cfd, r.data(), r.size(), 0);
       auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
       runtime_.audit.write(make_access_event(core::now_iso8601(), client_addr, host, req.uri, req.method, 403, ms, bytes_in,
