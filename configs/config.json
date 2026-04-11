@@ -21,6 +21,8 @@
   "user_blacklist": [],
   "url_whitelist": [],
   "url_blacklist": [],
+  "url_category_whitelist": [],
+  "url_category_blacklist": [],
   "default_access_action": "allow",
   "scanner_type": "mock",
   "clamav_mode": "unix",

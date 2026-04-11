@@ -16,6 +16,7 @@ struct AuditEvent {
   std::string user;
   std::string host;
   std::string url;
+  std::string url_category;
   std::string method;
   int status_code{0};
   std::uint64_t latency_ms{0};

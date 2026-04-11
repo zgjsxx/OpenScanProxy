@@ -131,6 +131,8 @@ struct Runtime {
                                     config.user_blacklist,
                                     config.url_whitelist,
                                     config.url_blacklist,
+                                    config.url_category_whitelist,
+                                    config.url_category_blacklist,
                                     policy::access_action_from_string(config.default_access_action)}),
         audit(config.audit_log_path, config.audit_recent_limit) {}
 };

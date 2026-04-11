@@ -37,3 +37,11 @@ add_executable(http_message_test
 )
 target_include_directories(http_message_test PRIVATE include)
 target_link_libraries(http_message_test PRIVATE OpenSSL::Crypto)
+
+add_executable(policy_test
+  tests/policy_test.cpp
+  src/core/util.cpp
+  src/policy/policy.cpp
+)
+target_include_directories(policy_test PRIVATE include)
+target_link_libraries(policy_test PRIVATE OpenSSL::Crypto)

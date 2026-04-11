@@ -73,6 +73,7 @@ audit::AuditEvent make_access_event(const std::string& timestamp, const std::str
   event.user = audit_user;
   event.host = host;
   event.url = url;
+  event.url_category = policy::classify_url(host, url);
   event.method = method;
   event.status_code = status_code;
   event.latency_ms = latency_ms;
@@ -552,6 +553,7 @@ void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host,
       scan_event.user = user.empty() ? "-" : user;
       scan_event.host = host;
       scan_event.url = req.uri;
+      scan_event.url_category = policy::classify_url(host, req.uri);
       scan_event.method = req.method;
       scan_event.filename = f.filename;
       scan_event.file_size = f.bytes.size();
@@ -602,6 +604,7 @@ void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host,
         scan_event.user = user.empty() ? "-" : user;
         scan_event.host = host;
         scan_event.url = req.uri;
+        scan_event.url_category = policy::classify_url(host, req.uri);
         scan_event.method = req.method;
         scan_event.status_code = resp.status;
         scan_event.filename = f.filename;
@@ -693,6 +696,7 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
     scan_event.user = user.empty() ? "-" : user;
     scan_event.host = host;
     scan_event.url = req.uri;
+    scan_event.url_category = policy::classify_url(host, req.uri);
     scan_event.method = req.method;
     scan_event.status_code = 0;
     scan_event.bytes_in = bytes_in;
@@ -803,6 +807,7 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
       scan_event.user = user.empty() ? "-" : user;
       scan_event.host = host;
       scan_event.url = req.uri;
+      scan_event.url_category = policy::classify_url(host, req.uri);
       scan_event.method = req.method;
       scan_event.status_code = resp.status;
       scan_event.bytes_in = bytes_in;
