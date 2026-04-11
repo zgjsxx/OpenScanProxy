@@ -1,4 +1,4 @@
-#include "openscanproxy/proxy/proxy_server.hpp"
+﻿#include "openscanproxy/proxy/proxy_server.hpp"
 
 #include "openscanproxy/core/logger.hpp"
 #include "openscanproxy/core/util.hpp"
@@ -111,8 +111,11 @@ std::string html_escape(const std::string& in) {
   return out;
 }
 
-std::string make_block_notification_response(const std::string& reason) {
+std::string make_block_notification_response(const std::string& reason, const std::string& matched_rule = "",
+                                             const std::string& matched_type = "") {
   auto escaped_reason = html_escape(reason.empty() ? "Blocked by access policy" : reason);
+  auto escaped_rule = html_escape(matched_rule);
+  auto escaped_type = html_escape(matched_type);
   std::ostringstream body;
   body << "<!doctype html><html><head><meta charset=\"utf-8\">"
        << "<title>Access Blocked</title>"
@@ -123,11 +126,25 @@ std::string make_block_notification_response(const std::string& reason) {
        << "box-shadow:0 10px 30px rgba(15,23,42,.08);}"
        << "h1{margin:0 0 8px;color:#b91c1c;font-size:28px;}h2{margin:0 0 14px;font-size:18px;color:#334155;}"
        << ".reason{padding:12px 14px;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;color:#991b1b;}"
+       << ".meta{margin-top:10px;padding:12px 14px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;color:#334155;}"
+       << ".meta strong{color:#0f172a;}"
+       << ".meta-row{margin-top:6px;word-break:break-word;}"
+       << ".meta-row:first-child{margin-top:0;}"
        << ".hint{margin-top:12px;color:#64748b;font-size:14px;}"
        << "</style></head><body><div class=\"card\"><h1>403 Access Blocked</h1>"
        << "<h2>OpenScanProxy 拦截了当前请求</h2>"
-       << "<div class=\"reason\"><strong>Reason:</strong> " << escaped_reason << "</div>"
-       << "<div class=\"hint\">如果你认为这是误拦截，请联系管理员并提供该页面截图。</div>"
+       << "<div class=\"reason\"><strong>Reason:</strong> " << escaped_reason << "</div>";
+  if (!matched_rule.empty() || !matched_type.empty()) {
+    body << "<div class=\"meta\">";
+    if (!matched_rule.empty()) {
+      body << "<div class=\"meta-row\"><strong>Matched Rule:</strong> " << escaped_rule << "</div>";
+    }
+    if (!matched_type.empty()) {
+      body << "<div class=\"meta-row\"><strong>Decision Source:</strong> " << escaped_type << "</div>";
+    }
+    body << "</div>";
+  }
+  body << "<div class=\"hint\">如果你认为这是误拦截，请联系管理员并提供该页面截图。</div>"
        << "</div></body></html>";
   auto body_s = body.str();
   std::ostringstream os;
@@ -468,7 +485,7 @@ void ProxyServer::handle_connect_tunnel(int cfd, const std::string& target, cons
   auto [host, port] = split_host_port(target, 443);
   auto access = runtime_.policy.evaluate_access(host, target, "CONNECT", user);
   if (access.action == policy::AccessAction::Block && !runtime_.config.enable_https_mitm) {
-    auto r = make_block_notification_response(access.reason);
+    auto r = make_block_notification_response(access.reason, access.matched_rule, access.matched_type);
     send(cfd, r.data(), r.size(), 0);
     runtime_.stats.inc_blocked();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
@@ -545,7 +562,7 @@ void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host,
     if (!http::parse_request(raw_req, req)) break;
     auto access = runtime_.policy.evaluate_access(host, req.uri, req.method, user);
     if (access.action == policy::AccessAction::Block) {
-      auto r = make_block_notification_response(access.reason);
+      auto r = make_block_notification_response(access.reason, access.matched_rule, access.matched_type);
       ssl_write_all(client_ssl, r.data(), r.size());
       runtime_.stats.inc_blocked();
       auto event = make_access_event(core::now_iso8601(), client_addr, host, req.uri, req.method, 403, 0, raw_req.size(), r.size(), true, user);
@@ -689,7 +706,7 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
   auto [host, port] = split_host_port(host_h, 80);
   auto access = runtime_.policy.evaluate_access(host, req.uri, req.method, user);
   if (access.action == policy::AccessAction::Block) {
-    auto r = make_block_notification_response(access.reason);
+    auto r = make_block_notification_response(access.reason, access.matched_rule, access.matched_type);
     send(cfd, r.data(), r.size(), 0);
     runtime_.stats.inc_blocked();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
@@ -859,3 +876,4 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
 }
 
 }  // namespace openscanproxy::proxy
+
