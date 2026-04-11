@@ -138,8 +138,25 @@ std::string config_to_json(const proxy::Runtime& runtime) {
   os << "\"https_mitm\":" << (c.enable_https_mitm ? "true" : "false") << ",";
   os << "\"scanner\":\"" << core::json_escape(c.scanner_type) << "\",";
   os << "\"policy_mode\":\"" << (p.fail_open ? "fail-open" : "fail-close") << "\",";
-  os << "\"suspicious_action\":\"" << (p.block_suspicious ? "block" : "log") << "\"";
+  os << "\"suspicious_action\":\"" << (p.block_suspicious ? "block" : "log") << "\",";
+  os << "\"proxy_auth_enabled\":" << (runtime.proxy_auth.enabled() ? "true" : "false") << ",";
+  os << "\"proxy_users_file\":\"" << core::json_escape(c.proxy_users_file) << "\"";
   os << "}";
+  return os.str();
+}
+
+std::string proxy_users_to_json(const proxy::Runtime& runtime) {
+  auto users = runtime.proxy_auth.list_users();
+  std::sort(users.begin(), users.end());
+  std::ostringstream os;
+  os << "{";
+  os << "\"enabled\":" << (runtime.proxy_auth.enabled() ? "true" : "false") << ",";
+  os << "\"users\":[";
+  for (std::size_t i = 0; i < users.size(); ++i) {
+    if (i) os << ",";
+    os << "{\"username\":\"" << core::json_escape(users[i]) << "\"}";
+  }
+  os << "]}";
   return os.str();
 }
 
@@ -149,6 +166,8 @@ std::string access_policy_to_json(const proxy::Runtime& runtime) {
   os << "{";
   os << "\"domain_whitelist\":" << json_array(p.domain_whitelist, true) << ",";
   os << "\"domain_blacklist\":" << json_array(p.domain_blacklist, true) << ",";
+  os << "\"user_whitelist\":" << json_array(p.user_whitelist, true) << ",";
+  os << "\"user_blacklist\":" << json_array(p.user_blacklist, true) << ",";
   os << "\"url_whitelist\":" << json_array(p.url_whitelist) << ",";
   os << "\"url_blacklist\":" << json_array(p.url_blacklist) << ",";
   os << "\"default_access_action\":\"" << policy::to_string(p.default_access_action) << "\"";
@@ -166,6 +185,7 @@ std::string logs_to_json(const std::vector<audit::AuditEvent>& logs) {
     os << "\"event_type\":\"" << core::json_escape(e.event_type) << "\",";
     os << "\"timestamp\":\"" << core::json_escape(e.timestamp) << "\",";
     os << "\"client_addr\":\"" << core::json_escape(e.client_addr) << "\",";
+    os << "\"user\":\"" << core::json_escape(e.user) << "\",";
     os << "\"host\":\"" << core::json_escape(e.host) << "\",";
     os << "\"url\":\"" << core::json_escape(e.url) << "\",";
     os << "\"method\":\"" << core::json_escape(e.method) << "\",";
@@ -195,6 +215,7 @@ std::vector<audit::AuditEvent> filter_logs(std::vector<audit::AuditEvent> logs, 
   const auto res = lower(q.count("result") ? q.at("result") : "");
   const auto host = lower(q.count("host") ? q.at("host") : "");
   const auto method = lower(q.count("method") ? q.at("method") : "");
+  const auto user = lower(q.count("user") ? q.at("user") : "");
   const auto path = lower(q.count("path") ? q.at("path") : "");
   const auto event_type = lower(q.count("event_type") ? q.at("event_type") : "");
   const int status = parse_int_or(q, "status", -1);
@@ -210,6 +231,7 @@ std::vector<audit::AuditEvent> filter_logs(std::vector<audit::AuditEvent> logs, 
     if (!act.empty() && lower(e.action) != act) continue;
     if (!res.empty() && lower(e.result) != res) continue;
     if (!method.empty() && lower(e.method) != method) continue;
+    if (!user.empty() && lower(e.user).find(user) == std::string::npos) continue;
     if (status >= 0 && e.status_code != status) continue;
     if (!path.empty() && lower(e.url).find(path) == std::string::npos) continue;
     if (!host.empty() && ehost.find(host) == std::string::npos) continue;
@@ -338,6 +360,19 @@ void AdminServer::run() {
         resp = http_resp(200, "OK", stats_to_json(runtime_.stats.snapshot()), "application/json");
       } else if (pure_path == "/api/config") {
         resp = http_resp(200, "OK", config_to_json(runtime_), "application/json");
+      } else if (pure_path == "/api/proxy-users" && method == "GET") {
+        resp = http_resp(200, "OK", proxy_users_to_json(runtime_), "application/json");
+      } else if (pure_path == "/api/proxy-users" && method == "POST") {
+        auto kv = core::parse_simple_json_object(get_body(req));
+        auto username = kv.count("username") ? core::trim(kv.at("username")) : "";
+        auto password = kv.count("password") ? kv.at("password") : "";
+        if (!runtime_.proxy_auth.upsert_user(username, password)) {
+          resp = http_resp(400, "Bad Request", "{\"ok\":false,\"error\":\"username/password required\"}", "application/json");
+        } else {
+          runtime_.proxy_auth.set_enabled(true);
+          runtime_.config.enable_proxy_auth = true;
+          resp = http_resp(200, "OK", "{\"ok\":true}", "application/json");
+        }
       } else if (pure_path == "/api/logs") {
         auto logs = filter_logs(runtime_.audit.latest(1000), parse_query(path));
         resp = http_resp(200, "OK", logs_to_json(logs), "application/json");
@@ -364,16 +399,22 @@ void AdminServer::run() {
         auto p = runtime_.policy.config();
         p.domain_whitelist = parse_string_array(body, "domain_whitelist");
         p.domain_blacklist = parse_string_array(body, "domain_blacklist");
+        p.user_whitelist = parse_string_array(body, "user_whitelist");
+        p.user_blacklist = parse_string_array(body, "user_blacklist");
         p.url_whitelist = parse_string_array(body, "url_whitelist");
         p.url_blacklist = parse_string_array(body, "url_blacklist");
         for (auto& d : p.domain_whitelist) d = lower(core::trim(d));
         for (auto& d : p.domain_blacklist) d = lower(core::trim(d));
+        for (auto& u : p.user_whitelist) u = lower(core::trim(u));
+        for (auto& u : p.user_blacklist) u = lower(core::trim(u));
         if (kv.count("default_access_action")) {
           p.default_access_action = policy::access_action_from_string(kv["default_access_action"]);
         }
         runtime_.policy.update(p);
         runtime_.config.domain_whitelist = p.domain_whitelist;
         runtime_.config.domain_blacklist = p.domain_blacklist;
+        runtime_.config.user_whitelist = p.user_whitelist;
+        runtime_.config.user_blacklist = p.user_blacklist;
         runtime_.config.url_whitelist = p.url_whitelist;
         runtime_.config.url_blacklist = p.url_blacklist;
         runtime_.config.default_access_action = policy::to_string(p.default_access_action);
@@ -384,9 +425,11 @@ void AdminServer::run() {
         auto host = kv.count("host") ? kv.at("host") : "";
         auto url = kv.count("url") ? kv.at("url") : "";
         auto req_method = kv.count("method") ? kv.at("method") : "GET";
-        auto r = runtime_.policy.evaluate_access(host, url, req_method);
+        auto user = kv.count("user") ? kv.at("user") : "";
+        auto r = runtime_.policy.evaluate_access(host, url, req_method, user);
         std::ostringstream out;
         out << "{";
+        out << "\"user\":\"" << core::json_escape(user) << "\",";
         out << "\"host\":\"" << core::json_escape(host) << "\",";
         out << "\"url\":\"" << core::json_escape(url) << "\",";
         out << "\"method\":\"" << core::json_escape(req_method) << "\",";

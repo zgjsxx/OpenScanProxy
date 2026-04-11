@@ -13,6 +13,7 @@ struct AuditEvent {
   std::string event_type{"scan"};
   std::string timestamp;
   std::string client_addr;
+  std::string user;
   std::string host;
   std::string url;
   std::string method;

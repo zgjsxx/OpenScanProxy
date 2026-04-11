@@ -57,11 +57,18 @@ core::Action PolicyEngine::decide(const core::ScanResult& result) const {
 }
 
 AccessPolicyResult PolicyEngine::evaluate_access(const std::string& host, const std::string& url,
-                                                 const std::string& /*method*/) const {
+                                                 const std::string& /*method*/, const std::string& user) const {
   auto cfg = config();
   const auto host_l = core::to_lower(host);
+  const auto user_l = core::to_lower(user);
   std::string hit;
 
+  if (!user_l.empty() && find_matched_rule(cfg.user_whitelist, user_l, hit)) {
+    return {AccessAction::Allow, hit, "user_whitelist", "matched user whitelist"};
+  }
+  if (!user_l.empty() && find_matched_rule(cfg.user_blacklist, user_l, hit)) {
+    return {AccessAction::Block, hit, "user_blacklist", "matched user blacklist"};
+  }
   if (find_matched_rule(cfg.domain_whitelist, host_l, hit)) {
     return {AccessAction::Allow, hit, "domain_whitelist", "matched domain whitelist"};
   }

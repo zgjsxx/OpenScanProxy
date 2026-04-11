@@ -24,6 +24,8 @@ struct AppConfig {
   std::vector<std::string> allowed_extensions;
   std::vector<std::string> domain_whitelist;
   std::vector<std::string> domain_blacklist;
+  std::vector<std::string> user_whitelist;
+  std::vector<std::string> user_blacklist;
   std::vector<std::string> url_whitelist;
   std::vector<std::string> url_blacklist;
   std::string default_access_action{"allow"};
@@ -42,6 +44,10 @@ struct AppConfig {
   std::size_t audit_recent_limit{500};
   std::string admin_user{"admin"};
   std::string admin_password{"admin123"};
+  bool enable_proxy_auth{false};
+  std::string proxy_auth_user{"proxy"};
+  std::string proxy_auth_password{"proxy123"};
+  std::string proxy_users_file{"./configs/proxy_users.json"};
 };
 
 class ConfigLoader {

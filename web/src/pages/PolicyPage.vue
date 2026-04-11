@@ -10,6 +10,12 @@
         <label>域名黑名单（每行一条）
           <textarea v-model="accessForm.domain_blacklist" rows="5"></textarea>
         </label>
+        <label>用户白名单（每行一条）
+          <textarea v-model="accessForm.user_whitelist" rows="5"></textarea>
+        </label>
+        <label>用户黑名单（每行一条）
+          <textarea v-model="accessForm.user_blacklist" rows="5"></textarea>
+        </label>
         <label>URL 白名单（每行一条）
           <textarea v-model="accessForm.url_whitelist" rows="5"></textarea>
         </label>
@@ -30,12 +36,26 @@
     <div class="card">
       <h3>访问测试</h3>
       <div class="row">
+        <input v-model="policyTest.user" placeholder="user，如 alice" />
         <input v-model="policyTest.host" placeholder="host，如 example.com" />
         <input v-model="policyTest.url" placeholder="url，如 /admin" />
         <input v-model="policyTest.method" placeholder="method，如 GET" />
         <button @click="runPolicyTest">测试</button>
       </div>
       <pre v-if="policyTestResult">{{ policyTestResult }}</pre>
+    </div>
+    <div class="card">
+      <h3>代理认证用户管理</h3>
+      <div class="muted">首次访问代理时，浏览器会弹窗要求输入这里创建的用户名和密码。</div>
+      <div class="row" style="margin-top:8px">
+        <input v-model="newProxyUser.username" placeholder="用户名" />
+        <input v-model="newProxyUser.password" placeholder="密码" type="password" />
+        <button @click="createProxyUser">创建/更新用户</button>
+      </div>
+      <div class="muted" style="margin-top:8px">已启用：{{ proxyUsers.enabled ? '是' : '否' }}</div>
+      <ul>
+        <li v-for="u in proxyUsers.users" :key="u.username">{{ u.username }}</li>
+      </ul>
     </div>
     <SystemConfig :config="config" />
   </div>
@@ -55,12 +75,16 @@ const message = ref('')
 const accessForm = ref({
   domain_whitelist: '',
   domain_blacklist: '',
+  user_whitelist: '',
+  user_blacklist: '',
   url_whitelist: '',
   url_blacklist: '',
   default_access_action: 'allow',
 })
-const policyTest = ref({ host: '', url: '/', method: 'GET' })
+const policyTest = ref({ user: '', host: '', url: '/', method: 'GET' })
 const policyTestResult = ref('')
+const proxyUsers = ref({ enabled: false, users: [] })
+const newProxyUser = ref({ username: '', password: '' })
 
 const asLines = (text) =>
   text
@@ -73,9 +97,12 @@ async function load() {
     policy.value = await getJson('/api/policy')
     config.value = await getJson('/api/config')
     const access = await getJson('/api/access-policy')
+    proxyUsers.value = await getJson('/api/proxy-users')
     accessForm.value = {
       domain_whitelist: (access.domain_whitelist || []).join('\n'),
       domain_blacklist: (access.domain_blacklist || []).join('\n'),
+      user_whitelist: (access.user_whitelist || []).join('\n'),
+      user_blacklist: (access.user_blacklist || []).join('\n'),
       url_whitelist: (access.url_whitelist || []).join('\n'),
       url_blacklist: (access.url_blacklist || []).join('\n'),
       default_access_action: access.default_access_action || 'allow',
@@ -100,6 +127,8 @@ async function saveAccessPolicy() {
     await postJson('/api/access-policy', {
       domain_whitelist: asLines(accessForm.value.domain_whitelist),
       domain_blacklist: asLines(accessForm.value.domain_blacklist),
+      user_whitelist: asLines(accessForm.value.user_whitelist),
+      user_blacklist: asLines(accessForm.value.user_blacklist),
       url_whitelist: asLines(accessForm.value.url_whitelist),
       url_blacklist: asLines(accessForm.value.url_blacklist),
       default_access_action: accessForm.value.default_access_action,
@@ -117,6 +146,17 @@ async function runPolicyTest() {
     policyTestResult.value = JSON.stringify(resp, null, 2)
   } catch {
     policyTestResult.value = '测试失败'
+  }
+}
+
+async function createProxyUser() {
+  try {
+    await postJson('/api/proxy-users', newProxyUser.value)
+    newProxyUser.value = { username: '', password: '' }
+    message.value = '代理用户保存成功'
+    await load()
+  } catch {
+    message.value = '代理用户保存失败'
   }
 }
 

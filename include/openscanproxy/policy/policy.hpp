@@ -15,6 +15,8 @@ struct PolicyConfig {
   bool block_suspicious{false};
   std::vector<std::string> domain_whitelist;
   std::vector<std::string> domain_blacklist;
+  std::vector<std::string> user_whitelist;
+  std::vector<std::string> user_blacklist;
   std::vector<std::string> url_whitelist;
   std::vector<std::string> url_blacklist;
   AccessAction default_access_action{AccessAction::Allow};
@@ -31,7 +33,8 @@ class PolicyEngine {
  public:
   explicit PolicyEngine(PolicyConfig cfg) : cfg_(cfg) {}
   core::Action decide(const core::ScanResult& result) const;
-  AccessPolicyResult evaluate_access(const std::string& host, const std::string& url, const std::string& method) const;
+  AccessPolicyResult evaluate_access(const std::string& host, const std::string& url, const std::string& method,
+                                     const std::string& user = "") const;
   PolicyConfig config() const;
   void update(PolicyConfig cfg);
 
