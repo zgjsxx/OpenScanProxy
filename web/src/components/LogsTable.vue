@@ -20,26 +20,28 @@
       <span class="muted">第 {{ pager.page }} 页</span>
       <button @click="$emit('set-page', pager.page + 1)" :disabled="logs.length < pager.pageSize">下一页</button>
     </div>
-    <table class="table logs-table">
-      <thead><tr><th>类型</th><th>时间</th><th>方法</th><th>状态</th><th>客户端</th><th>用户</th><th>主机</th><th>URL</th><th>URL分类</th><th>文件</th><th>结果</th><th>动作</th><th>签名</th></tr></thead>
-      <tbody>
-        <tr v-for="(e, idx) in logs" :key="`${e.timestamp}-${idx}`">
-          <td>{{ e.event_type || '' }}</td>
-          <td>{{ e.timestamp }}</td>
-          <td>{{ e.method || '' }}</td>
-          <td>{{ e.status_code || '' }}</td>
-          <td>{{ e.client_addr || '' }}</td>
-          <td>{{ e.user || '' }}</td>
-          <td class="clip-cell host-cell" :title="e.host || ''">{{ e.host || '' }}</td>
-          <td class="clip-cell url-cell" :title="e.url || ''">{{ e.url || '' }}</td>
-          <td>{{ e.url_category || '' }}</td>
-          <td>{{ e.filename || '' }}</td>
-          <td>{{ e.result || '' }}</td>
-          <td class="action-cell"><span class="pill" :class="e.action">{{ e.action }}</span></td>
-          <td class="clip-cell sig-cell" :title="e.signature || ''">{{ e.signature || '' }}</td>
-        </tr>
-      </tbody>
-    </table>
+    <div class="table-wrap">
+      <table class="table logs-table">
+        <thead><tr><th>类型</th><th>时间</th><th>方法</th><th>状态</th><th>客户端</th><th>用户</th><th>主机</th><th>URL</th><th>URL分类</th><th>文件</th><th>结果</th><th>动作</th><th>签名</th></tr></thead>
+        <tbody>
+          <tr v-for="(e, idx) in logs" :key="`${e.timestamp}-${idx}`">
+            <td>{{ e.event_type || '' }}</td>
+            <td>{{ e.timestamp }}</td>
+            <td>{{ e.method || '' }}</td>
+            <td>{{ e.status_code || '' }}</td>
+            <td>{{ e.client_addr || '' }}</td>
+            <td>{{ e.user || '' }}</td>
+            <td class="clip-cell host-cell" :title="e.host || ''">{{ e.host || '' }}</td>
+            <td class="clip-cell url-cell" :title="e.url || ''">{{ e.url || '' }}</td>
+            <td class="category-cell">{{ e.url_category || '' }}</td>
+            <td class="clip-cell file-cell" :title="e.filename || ''">{{ e.filename || '' }}</td>
+            <td>{{ e.result || '' }}</td>
+            <td class="action-cell"><span class="pill" :class="e.action">{{ e.action }}</span></td>
+            <td class="clip-cell sig-cell" :title="e.signature || ''">{{ e.signature || '' }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 </template>
 
@@ -55,6 +57,13 @@ defineEmits(['refresh', 'set-page'])
 <style scoped>
 .logs-table {
   table-layout: fixed;
+  min-width: 1320px;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid #243458;
+  border-radius: 8px;
 }
 
 .clip-cell {
@@ -64,18 +73,26 @@ defineEmits(['refresh', 'set-page'])
 }
 
 .host-cell {
-  max-width: 160px;
+  width: 160px;
 }
 
 .url-cell {
-  max-width: 260px;
+  width: 260px;
+}
+
+.category-cell {
+  width: 92px;
+}
+
+.file-cell {
+  width: 150px;
 }
 
 .sig-cell {
-  max-width: 140px;
+  width: 140px;
 }
 
 .action-cell {
-  width: 72px;
+  width: 80px;
 }
 </style>
