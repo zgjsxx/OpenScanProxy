@@ -1,5 +1,6 @@
 #include "openscanproxy/admin/admin_server.hpp"
 
+#include "openscanproxy/core/logger.hpp"
 #include "openscanproxy/core/util.hpp"
 
 #include <arpa/inet.h>
@@ -15,7 +16,6 @@
 #include <regex>
 #include <sstream>
 #include <thread>
-#include <iostream>
 
 namespace openscanproxy::admin {
 namespace {
@@ -302,7 +302,7 @@ std::string serve_static(const std::filesystem::path& root, const std::string& r
 void AdminServer::run() {
   int fd = ::socket(AF_INET, SOCK_STREAM, 0);
   if (fd < 0) {
-    std::cerr << "admin: socket() failed" << std::endl;
+    core::app_logger().log(core::LogLevel::Error, "admin: socket() failed");
     return;
   }
   int one = 1;
@@ -312,16 +312,20 @@ void AdminServer::run() {
   addr.sin_port = htons(runtime_.config.admin_listen_port);
   inet_pton(AF_INET, runtime_.config.admin_listen_host.c_str(), &addr.sin_addr);
   if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-    std::cerr << "admin: bind() failed on " << runtime_.config.admin_listen_host << ":" << runtime_.config.admin_listen_port << std::endl;
+    core::app_logger().log(core::LogLevel::Error,
+                           "admin: bind() failed on " + runtime_.config.admin_listen_host + ":" +
+                               std::to_string(runtime_.config.admin_listen_port));
     close(fd);
     return;
   }
   if (listen(fd, 64) != 0) {
-    std::cerr << "admin: listen() failed" << std::endl;
+    core::app_logger().log(core::LogLevel::Error, "admin: listen() failed");
     close(fd);
     return;
   }
-  std::cout << "admin listening on " << runtime_.config.admin_listen_host << ":" << runtime_.config.admin_listen_port << std::endl;
+  core::app_logger().log(core::LogLevel::Info,
+                         "admin listening on " + runtime_.config.admin_listen_host + ":" +
+                             std::to_string(runtime_.config.admin_listen_port));
 
   while (true) {
     int c = accept(fd, nullptr, nullptr);

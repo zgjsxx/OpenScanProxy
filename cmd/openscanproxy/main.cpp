@@ -1,9 +1,9 @@
 #include "openscanproxy/admin/admin_server.hpp"
 #include "openscanproxy/config/config.hpp"
+#include "openscanproxy/core/logger.hpp"
 #include "openscanproxy/proxy/proxy_server.hpp"
 #include "openscanproxy/scanner/scanner.hpp"
 
-#include <iostream>
 #include <csignal>
 #include <thread>
 
@@ -15,6 +15,7 @@ int main(int argc, char** argv) {
   try {
     std::signal(SIGPIPE, SIG_IGN);
     auto cfg = config::ConfigLoader::load_from_file(config_path);
+    core::app_logger().configure(cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
     proxy::Runtime runtime(cfg);
 
     runtime.scan_ctx.timeout_ms = cfg.scan_timeout_ms;
@@ -24,11 +25,11 @@ int main(int argc, char** argv) {
       runtime.scanner = scanner::create_mock_scanner();
     }
 
-    std::cout << "admin static dir: " << cfg.admin_static_dir << std::endl;
+    core::app_logger().log(core::LogLevel::Info, "admin static dir: " + cfg.admin_static_dir);
 
     if (cfg.enable_https_mitm) {
       if (!runtime.tls_mitm.initialize(cfg.ca_cert_path, cfg.ca_key_path)) {
-        std::cerr << "failed to initialize TLS MITM engine" << std::endl;
+        core::app_logger().log(core::LogLevel::Error, "failed to initialize TLS MITM engine");
       }
     }
 
@@ -41,7 +42,7 @@ int main(int argc, char** argv) {
     t1.join();
     t2.join();
   } catch (const std::exception& ex) {
-    std::cerr << "fatal: " << ex.what() << std::endl;
+    core::app_logger().log(core::LogLevel::Error, std::string("fatal: ") + ex.what());
     return 1;
   }
 
