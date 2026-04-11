@@ -10,6 +10,17 @@ namespace openscanproxy::policy {
 
 enum class AccessAction { Allow, Block };
 
+struct AccessRule {
+  std::string name;
+  std::vector<std::string> users;
+  std::vector<std::string> domain_whitelist;
+  std::vector<std::string> domain_blacklist;
+  std::vector<std::string> url_whitelist;
+  std::vector<std::string> url_blacklist;
+  std::vector<std::string> url_category_whitelist;
+  std::vector<std::string> url_category_blacklist;
+};
+
 struct PolicyConfig {
   bool fail_open{true};
   bool block_suspicious{false};
@@ -21,6 +32,7 @@ struct PolicyConfig {
   std::vector<std::string> url_blacklist;
   std::vector<std::string> url_category_whitelist;
   std::vector<std::string> url_category_blacklist;
+  std::vector<AccessRule> access_rules;
   AccessAction default_access_action{AccessAction::Allow};
 };
 

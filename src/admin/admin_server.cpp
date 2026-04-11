@@ -64,6 +64,56 @@ std::string json_array(const std::vector<std::string>& values, bool lower_case =
   return os.str();
 }
 
+std::string access_rules_json_array(const std::vector<policy::AccessRule>& rules) {
+  std::ostringstream os;
+  os << "[";
+  for (std::size_t i = 0; i < rules.size(); ++i) {
+    if (i) os << ",";
+    const auto& r = rules[i];
+    os << "{";
+    os << "\"name\":\"" << core::json_escape(r.name) << "\",";
+    os << "\"users\":" << json_array(r.users, true) << ",";
+    os << "\"domain_whitelist\":" << json_array(r.domain_whitelist, true) << ",";
+    os << "\"domain_blacklist\":" << json_array(r.domain_blacklist, true) << ",";
+    os << "\"url_whitelist\":" << json_array(r.url_whitelist) << ",";
+    os << "\"url_blacklist\":" << json_array(r.url_blacklist) << ",";
+    os << "\"url_category_whitelist\":" << json_array(r.url_category_whitelist, true) << ",";
+    os << "\"url_category_blacklist\":" << json_array(r.url_category_blacklist, true);
+    os << "}";
+  }
+  os << "]";
+  return os.str();
+}
+
+std::vector<policy::AccessRule> parse_access_rules(const std::string& text) {
+  std::vector<policy::AccessRule> rules;
+  std::regex arr("\\\"access_rules\\\"\\s*:\\s*\\[(.*)\\]", std::regex::icase);
+  std::smatch arr_match;
+  if (!std::regex_search(text, arr_match, arr)) return rules;
+  auto body = arr_match[1].str();
+  std::regex obj("\\{([^\\{\\}]*)\\}");
+  for (std::sregex_iterator it(body.begin(), body.end(), obj), end; it != end; ++it) {
+    const auto item = (*it)[0].str();
+    auto kv = core::parse_simple_json_object(item);
+    policy::AccessRule r;
+    if (kv.count("name")) r.name = kv.at("name");
+    r.users = parse_string_array(item, "users");
+    r.domain_whitelist = parse_string_array(item, "domain_whitelist");
+    r.domain_blacklist = parse_string_array(item, "domain_blacklist");
+    r.url_whitelist = parse_string_array(item, "url_whitelist");
+    r.url_blacklist = parse_string_array(item, "url_blacklist");
+    r.url_category_whitelist = parse_string_array(item, "url_category_whitelist");
+    r.url_category_blacklist = parse_string_array(item, "url_category_blacklist");
+    for (auto& u : r.users) u = lower(core::trim(u));
+    for (auto& d : r.domain_whitelist) d = lower(core::trim(d));
+    for (auto& d : r.domain_blacklist) d = lower(core::trim(d));
+    for (auto& c : r.url_category_whitelist) c = lower(core::trim(c));
+    for (auto& c : r.url_category_blacklist) c = lower(core::trim(c));
+    rules.push_back(std::move(r));
+  }
+  return rules;
+}
+
 std::string get_header(const std::string& req, const std::string& key) {
   auto pos = req.find("\r\n" + key + ":");
   if (pos == std::string::npos) return "";
@@ -173,6 +223,7 @@ std::string access_policy_to_json(const proxy::Runtime& runtime) {
   os << "\"url_blacklist\":" << json_array(p.url_blacklist) << ",";
   os << "\"url_category_whitelist\":" << json_array(p.url_category_whitelist, true) << ",";
   os << "\"url_category_blacklist\":" << json_array(p.url_category_blacklist, true) << ",";
+  os << "\"access_rules\":" << access_rules_json_array(p.access_rules) << ",";
   os << "\"default_access_action\":\"" << policy::to_string(p.default_access_action) << "\"";
   os << "}";
   return os.str();
@@ -426,6 +477,7 @@ void AdminServer::run() {
         p.url_blacklist = parse_string_array(body, "url_blacklist");
         p.url_category_whitelist = parse_string_array(body, "url_category_whitelist");
         p.url_category_blacklist = parse_string_array(body, "url_category_blacklist");
+        p.access_rules = parse_access_rules(body);
         for (auto& d : p.domain_whitelist) d = lower(core::trim(d));
         for (auto& d : p.domain_blacklist) d = lower(core::trim(d));
         for (auto& u : p.user_whitelist) u = lower(core::trim(u));
@@ -444,6 +496,7 @@ void AdminServer::run() {
         runtime_.config.url_blacklist = p.url_blacklist;
         runtime_.config.url_category_whitelist = p.url_category_whitelist;
         runtime_.config.url_category_blacklist = p.url_category_blacklist;
+        runtime_.config.access_rules = p.access_rules;
         runtime_.config.default_access_action = policy::to_string(p.default_access_action);
         resp = http_resp(200, "OK", access_policy_to_json(runtime_), "application/json");
       } else if (pure_path == "/api/policy/test" && method == "POST") {
