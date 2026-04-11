@@ -45,6 +45,44 @@ bool find_matched_rule(const std::vector<std::string>& rules, const std::string&
   return false;
 }
 
+bool user_matches_rule(const std::vector<std::string>& users, const std::string& user_l) {
+  if (users.empty()) return true;
+  if (user_l.empty()) return false;
+  std::string hit;
+  return find_matched_rule(users, user_l, hit);
+}
+
+AccessPolicyResult evaluate_named_rule(const AccessRule& rule, const std::string& host_l, const std::string& url,
+                                      const std::string& category) {
+  std::string hit;
+  const auto rule_name = rule.name.empty() ? "<unnamed>" : rule.name;
+  if (find_matched_rule(rule.domain_whitelist, host_l, hit)) {
+    return {AccessAction::Allow, rule_name + ":domain_whitelist:" + hit, "rule_domain_whitelist",
+            "matched rule domain whitelist", category};
+  }
+  if (find_matched_rule(rule.url_whitelist, url, hit)) {
+    return {AccessAction::Allow, rule_name + ":url_whitelist:" + hit, "rule_url_whitelist",
+            "matched rule url whitelist", category};
+  }
+  if (find_matched_rule(rule.url_category_whitelist, category, hit)) {
+    return {AccessAction::Allow, rule_name + ":url_category_whitelist:" + hit, "rule_url_category_whitelist",
+            "matched rule url category whitelist", category};
+  }
+  if (find_matched_rule(rule.domain_blacklist, host_l, hit)) {
+    return {AccessAction::Block, rule_name + ":domain_blacklist:" + hit, "rule_domain_blacklist",
+            "matched rule domain blacklist", category};
+  }
+  if (find_matched_rule(rule.url_blacklist, url, hit)) {
+    return {AccessAction::Block, rule_name + ":url_blacklist:" + hit, "rule_url_blacklist",
+            "matched rule url blacklist", category};
+  }
+  if (find_matched_rule(rule.url_category_blacklist, category, hit)) {
+    return {AccessAction::Block, rule_name + ":url_category_blacklist:" + hit, "rule_url_category_blacklist",
+            "matched rule url category blacklist", category};
+  }
+  return {AccessAction::Allow, "", "", "", category};
+}
+
 bool contains_any(const std::string& text, const std::vector<std::string>& needles) {
   for (const auto& n : needles) {
     if (!n.empty() && text.find(n) != std::string::npos) return true;
@@ -104,6 +142,7 @@ std::string classify_url(const std::string& host, const std::string& url) {
   if (contains_any(text, {"facebook", "twitter", "x.com", "instagram", "tiktok", "weibo", "reddit"})) return "social";
   if (contains_any(text, {"youtube", "netflix", "bilibili", "twitch", "spotify", "douyin", "youku", "iqiyi", "qq.com/video"})) return "video";
   if (contains_any(text, {"github", "gitlab", "bitbucket", "npmjs", "pypi", "docker"})) return "developer";
+  if (contains_any(text, {"game", "steam", "epicgames", "riotgames", "roblox", "minecraft"})) return "game";
   if (contains_any(text, {"drive.google.com", "dropbox", "onedrive", "box.com", "mega.nz", "aliyundrive"})) return "cloud_storage";
   if (contains_any(text, {"amazon", "taobao", "tmall", "ebay", "jd.com", "shop", "1688", "alicdn", "alibaba"})) return "shopping";
   if (contains_any(text, {"bank", "pay", "wallet", "finance", "alipay", "paypal", "tenpay"})) return "finance";
@@ -158,6 +197,11 @@ AccessPolicyResult PolicyEngine::evaluate_access(const std::string& host, const 
   }
   if (find_matched_rule(cfg.url_category_blacklist, category, hit)) {
     return {AccessAction::Block, hit, "url_category_blacklist", "matched url category blacklist", category};
+  }
+  for (const auto& rule : cfg.access_rules) {
+    if (!user_matches_rule(rule.users, user_l)) continue;
+    auto result = evaluate_named_rule(rule, host_l, url, category);
+    if (!result.matched_type.empty()) return result;
   }
   return {cfg.default_access_action, "", "default_access_action", "fallback to default access action", category};
 }

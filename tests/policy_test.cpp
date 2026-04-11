@@ -64,6 +64,34 @@ bool test_domain_category_dataset() {
          expect(c2 == "shopping", "classify by exact domain") && expect(c3 == "shopping", "classify by subdomain suffix");
 }
 
+bool test_user_scoped_access_rules() {
+  PolicyConfig cfg;
+  cfg.default_access_action = AccessAction::Allow;
+
+  openscanproxy::policy::AccessRule allow_game_for_user001;
+  allow_game_for_user001.name = "allow-user001-game";
+  allow_game_for_user001.users = {"user001"};
+  allow_game_for_user001.url_category_whitelist = {"game"};
+
+  openscanproxy::policy::AccessRule block_shop_for_user002;
+  block_shop_for_user002.name = "block-user002-shopping";
+  block_shop_for_user002.users = {"user002"};
+  block_shop_for_user002.url_category_blacklist = {"shopping"};
+
+  cfg.access_rules = {allow_game_for_user001, block_shop_for_user002};
+  PolicyEngine engine(cfg);
+
+  auto r1 = engine.evaluate_access("play.game.example.com", "/", "GET", "user001");
+  auto r2 = engine.evaluate_access("www.1688.com", "/", "GET", "user002");
+  auto r3 = engine.evaluate_access("www.1688.com", "/", "GET", "user001");
+
+  return expect(r1.action == AccessAction::Allow, "user001 allow game category") &&
+         expect(r1.matched_type == "rule_url_category_whitelist", "user001 matched rule whitelist") &&
+         expect(r2.action == AccessAction::Block, "user002 block shopping category") &&
+         expect(r2.matched_type == "rule_url_category_blacklist", "user002 matched rule blacklist") &&
+         expect(r3.action == AccessAction::Allow, "user001 unaffected by user002 rule");
+}
+
 }  // namespace
 
 int main() {
@@ -72,6 +100,7 @@ int main() {
   ok = test_category_blacklist() && ok;
   ok = test_category_whitelist() && ok;
   ok = test_domain_category_dataset() && ok;
+  ok = test_user_scoped_access_rules() && ok;
   if (ok) {
     std::cout << "All policy tests passed\n";
     return 0;

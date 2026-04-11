@@ -28,6 +28,31 @@ std::vector<std::string> parse_string_array(const std::string& text, const std::
   return out;
 }
 
+std::vector<policy::AccessRule> parse_access_rules(const std::string& text) {
+  std::vector<policy::AccessRule> rules;
+  std::regex arr("\\\"access_rules\\\"\\s*:\\s*\\[(.*)\\]", std::regex::icase);
+  std::smatch arr_match;
+  if (!std::regex_search(text, arr_match, arr)) return rules;
+  const auto body = arr_match[1].str();
+
+  std::regex obj("\\{([^\\{\\}]*)\\}");
+  for (std::sregex_iterator it(body.begin(), body.end(), obj), end; it != end; ++it) {
+    const auto item = (*it)[0].str();
+    auto kv = core::parse_simple_json_object(item);
+    policy::AccessRule rule;
+    if (kv.count("name")) rule.name = kv.at("name");
+    rule.users = parse_string_array(item, "users");
+    rule.domain_whitelist = parse_string_array(item, "domain_whitelist");
+    rule.domain_blacklist = parse_string_array(item, "domain_blacklist");
+    rule.url_whitelist = parse_string_array(item, "url_whitelist");
+    rule.url_blacklist = parse_string_array(item, "url_blacklist");
+    rule.url_category_whitelist = parse_string_array(item, "url_category_whitelist");
+    rule.url_category_blacklist = parse_string_array(item, "url_category_blacklist");
+    rules.push_back(std::move(rule));
+  }
+  return rules;
+}
+
 bool as_bool(const std::string& v) { return v == "true" || v == "1"; }
 
 }  // namespace
@@ -87,6 +112,7 @@ AppConfig ConfigLoader::load_from_file(const std::string& path) {
   cfg.url_blacklist = parse_string_array(text, "url_blacklist");
   cfg.url_category_whitelist = parse_string_array(text, "url_category_whitelist");
   cfg.url_category_blacklist = parse_string_array(text, "url_category_blacklist");
+  cfg.access_rules = parse_access_rules(text);
   if (cfg.default_access_action != "allow" && cfg.default_access_action != "block") {
     cfg.default_access_action = "allow";
   }
