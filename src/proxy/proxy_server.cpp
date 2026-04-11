@@ -11,10 +11,12 @@
 
 #include <cstring>
 #include <chrono>
+#include <algorithm>
 #include <memory>
 #include <mutex>
 #include <sstream>
 #include <thread>
+#include <vector>
 
 namespace openscanproxy::proxy {
 namespace {
@@ -84,6 +86,54 @@ std::string make_forbidden_response(const std::string& message) {
   return os.str();
 }
 
+bool send_all(int fd, const char* data, std::size_t size) {
+  std::size_t sent = 0;
+  while (sent < size) {
+    auto n = send(fd, data + sent, size - sent, 0);
+    if (n <= 0) return false;
+    sent += static_cast<std::size_t>(n);
+  }
+  return true;
+}
+
+bool parse_content_length_header(const std::map<std::string, std::string>& headers, std::size_t& content_length) {
+  auto raw = http::header_get(headers, "Content-Length");
+  if (raw.empty()) {
+    content_length = 0;
+    return true;
+  }
+  std::uint64_t v = 0;
+  std::istringstream is(raw);
+  is >> v;
+  if (!is || !is.eof()) return false;
+  content_length = static_cast<std::size_t>(v);
+  return true;
+}
+
+bool has_chunked_encoding(const std::map<std::string, std::string>& headers) {
+  auto te = core::to_lower(http::header_get(headers, "Transfer-Encoding"));
+  return te.find("chunked") != std::string::npos;
+}
+
+bool parse_response_head(const std::string& raw_head, std::string& version, int& status,
+                         std::map<std::string, std::string>& headers) {
+  headers.clear();
+  auto line_end = raw_head.find("\r\n");
+  if (line_end == std::string::npos) return false;
+  std::istringstream sl(raw_head.substr(0, line_end));
+  if (!(sl >> version >> status)) return false;
+  std::istringstream hs(raw_head.substr(line_end + 2));
+  std::string hline;
+  while (std::getline(hs, hline)) {
+    if (!hline.empty() && hline.back() == '\r') hline.pop_back();
+    if (hline.empty()) continue;
+    auto pos = hline.find(':');
+    if (pos == std::string::npos) return false;
+    headers[core::trim(hline.substr(0, pos))] = core::trim(hline.substr(pos + 1));
+  }
+  return true;
+}
+
 }  // namespace
 
 void ProxyServer::run() {
@@ -110,34 +160,72 @@ void ProxyServer::run() {
 }
 
 void ProxyServer::handle_client(int cfd, const std::string& client_addr) {
-  auto start = std::chrono::steady_clock::now();
-  runtime_.stats.inc_total_requests();
-  char buf[1024 * 1024];
-  auto n = recv(cfd, buf, sizeof(buf), 0);
-  std::size_t bytes_in = n > 0 ? static_cast<std::size_t>(n) : 0;
-  if (n <= 0) {
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
-    runtime_.audit.write(make_access_event(core::now_iso8601(), client_addr, "", "", "", 400, ms, bytes_in, 0, false));
-    close(cfd);
-    return;
-  }
-  std::string raw(buf, n);
-  auto line_end = raw.find("\r\n");
-  auto first = raw.substr(0, line_end);
-  std::istringstream fl(first);
-  std::string method, target;
-  fl >> method >> target;
-  if (method.empty()) {
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
-    runtime_.audit.write(make_access_event(core::now_iso8601(), client_addr, "", target, method, 400, ms, bytes_in, 0, false));
-    close(cfd);
-    return;
-  }
+  std::string pending;
+  char buf[8192];
+  while (true) {
+    while (pending.find("\r\n\r\n") == std::string::npos) {
+      auto n = recv(cfd, buf, sizeof(buf), 0);
+      if (n <= 0) {
+        close(cfd);
+        return;
+      }
+      pending.append(buf, static_cast<std::size_t>(n));
+    }
 
-  if (method == "CONNECT") {
-    handle_connect_tunnel(cfd, target, client_addr);
-  } else {
-    handle_http_forward(cfd, client_addr, raw);
+    auto header_end = pending.find("\r\n\r\n");
+    auto line_end = pending.find("\r\n");
+    if (line_end == std::string::npos || line_end > header_end) break;
+
+    std::string method;
+    std::string target;
+    std::string version;
+    {
+      std::istringstream fl(pending.substr(0, line_end));
+      fl >> method >> target >> version;
+    }
+    if (method.empty()) break;
+
+    std::size_t content_length = 0;
+    std::map<std::string, std::string> headers;
+    std::istringstream hs(pending.substr(line_end + 2, header_end - line_end - 2));
+    std::string hline;
+    while (std::getline(hs, hline)) {
+      if (!hline.empty() && hline.back() == '\r') hline.pop_back();
+      if (hline.empty()) continue;
+      auto pos = hline.find(':');
+      if (pos == std::string::npos) break;
+      headers[core::trim(hline.substr(0, pos))] = core::trim(hline.substr(pos + 1));
+    }
+    auto is_chunked = has_chunked_encoding(headers);
+    if (!is_chunked && !parse_content_length_header(headers, content_length)) break;
+
+    if (is_chunked) {
+      while (pending.find("\r\n0\r\n\r\n", header_end + 4) == std::string::npos) {
+        auto n = recv(cfd, buf, sizeof(buf), 0);
+        if (n <= 0) break;
+        pending.append(buf, static_cast<std::size_t>(n));
+      }
+    } else {
+      auto expected = header_end + 4 + content_length;
+      while (pending.size() < expected) {
+        auto n = recv(cfd, buf, sizeof(buf), 0);
+        if (n <= 0) break;
+        pending.append(buf, static_cast<std::size_t>(n));
+      }
+    }
+
+    std::size_t consumed = pending.size();
+    if (!is_chunked) consumed = header_end + 4 + content_length;
+    auto raw = pending.substr(0, consumed);
+    pending.erase(0, consumed);
+
+    runtime_.stats.inc_total_requests();
+    if (method == "CONNECT") {
+      handle_connect_tunnel(cfd, target, client_addr);
+      break;
+    }
+    if (!handle_http_forward(cfd, client_addr, raw)) break;
+    if (!pending.empty()) continue;
   }
   close(cfd);
 }
@@ -243,21 +331,21 @@ void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host)
   close(sfd);
 }
 
-void ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, const std::string& raw) {
+bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, const std::string& raw) {
   auto start = std::chrono::steady_clock::now();
   std::size_t bytes_in = raw.size();
   http::HttpRequest req;
   if (!http::parse_request(raw, req)) {
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
     runtime_.audit.write(make_access_event(core::now_iso8601(), client_addr, "", "", "", 400, ms, bytes_in, 0, false));
-    return;
+    return false;
   }
 
   auto host_h = http::header_get(req.headers, "Host");
   if (host_h.empty()) {
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
     runtime_.audit.write(make_access_event(core::now_iso8601(), client_addr, "", req.uri, req.method, 400, ms, bytes_in, 0, false));
-    return;
+    return false;
   }
   auto [host, port] = split_host_port(host_h, 80);
   auto access = runtime_.policy.evaluate_access(host, req.uri, req.method);
@@ -272,7 +360,7 @@ void ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
     event.rule_hit = access.matched_rule;
     event.decision_source = access.matched_type;
     runtime_.audit.write(event);
-    return;
+    return false;
   }
 
   for (auto& f : runtime_.extractor.from_request(req, host)) {
@@ -318,7 +406,7 @@ void ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
       auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
       runtime_.audit.write(make_access_event(core::now_iso8601(), client_addr, host, req.uri, req.method, 403, ms, bytes_in,
                                              r.size(), false));
-      return;
+      return false;
     }
   }
 
@@ -326,19 +414,63 @@ void ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
   if (sfd < 0) {
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
     runtime_.audit.write(make_access_event(core::now_iso8601(), client_addr, host, req.uri, req.method, 502, ms, bytes_in, 0, false));
-    return;
+    return false;
   }
-  send(sfd, raw.data(), raw.size(), 0);
+  if (!send_all(sfd, raw.data(), raw.size())) {
+    close(sfd);
+    return false;
+  }
 
-  std::string upstream;
-  char b[1024 * 1024];
-  auto n = recv(sfd, b, sizeof(b), 0);
-  if (n > 0) upstream.assign(b, n);
+  std::string upstream_for_parse;
+  upstream_for_parse.reserve(64 * 1024);
+  std::size_t bytes_out = 0;
+  int final_status = 502;
+  bool parseable = true;
+  std::size_t header_end = std::string::npos;
+  std::size_t response_content_length = 0;
+  bool response_chunked = false;
+  bool response_close_delimited = false;
+  bool should_stop = false;
+  char b[8192];
+  while (!should_stop) {
+    auto n = recv(sfd, b, sizeof(b), 0);
+    if (n <= 0) break;
+    bytes_out += static_cast<std::size_t>(n);
+    if (!send_all(cfd, b, static_cast<std::size_t>(n))) {
+      close(sfd);
+      return false;
+    }
+    if (parseable) upstream_for_parse.append(b, static_cast<std::size_t>(n));
+
+    if (header_end == std::string::npos) {
+      header_end = upstream_for_parse.find("\r\n\r\n");
+      if (header_end != std::string::npos) {
+        std::string response_version;
+        std::map<std::string, std::string> response_headers;
+        auto header_only = upstream_for_parse.substr(0, header_end + 2);
+        if (!parse_response_head(header_only, response_version, final_status, response_headers)) {
+          parseable = false;
+        } else {
+          response_chunked = has_chunked_encoding(response_headers);
+          response_close_delimited = !response_chunked && http::header_get(response_headers, "Content-Length").empty();
+          if (!response_chunked && !parse_content_length_header(response_headers, response_content_length)) parseable = false;
+        }
+      }
+    }
+
+    if (header_end != std::string::npos) {
+      if (response_chunked) {
+        if (upstream_for_parse.find("\r\n0\r\n\r\n", header_end + 4) != std::string::npos) should_stop = true;
+      } else if (!response_close_delimited) {
+        if (upstream_for_parse.size() >= header_end + 4 + response_content_length) should_stop = true;
+      }
+    }
+    if (upstream_for_parse.size() > 4 * 1024 * 1024) parseable = false;
+  }
   close(sfd);
-  std::size_t bytes_out = upstream.size();
-  int final_status = upstream.empty() ? 502 : 200;
 
   http::HttpResponse resp;
+  std::string upstream = parseable ? upstream_for_parse : std::string{};
   if (http::parse_response(upstream, resp)) {
     final_status = resp.status;
     for (auto& f : runtime_.extractor.from_response(req, resp, host)) {
@@ -352,18 +484,7 @@ void ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
       else runtime_.stats.inc_scanner_error();
 
       auto action = runtime_.policy.decide(result);
-      if (action == core::Action::Block) {
-        runtime_.stats.inc_blocked();
-        std::string body = "<html><body><h1>Download Blocked</h1><p>Threat: " + result.signature + "</p></body></html>";
-        std::ostringstream os;
-        os << "HTTP/1.1 403 Forbidden\r\nContent-Type: text/html\r\nContent-Length: " << body.size() << "\r\n\r\n" << body;
-        auto r = os.str();
-        send(cfd, r.data(), r.size(), 0);
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
-        runtime_.audit.write(make_access_event(core::now_iso8601(), client_addr, host, req.uri, req.method, 403, ms, bytes_in,
-                                               r.size(), false));
-        return;
-      }
+      if (action == core::Action::Block) runtime_.stats.inc_blocked();
       audit::AuditEvent scan_event;
       scan_event.event_type = "scan";
       scan_event.timestamp = core::now_iso8601();
@@ -387,11 +508,11 @@ void ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
       runtime_.audit.write(scan_event);
     }
   }
-
-  send(cfd, upstream.data(), upstream.size(), 0);
   auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
   runtime_.audit.write(
       make_access_event(core::now_iso8601(), client_addr, host, req.uri, req.method, final_status, ms, bytes_in, bytes_out, false));
+  return !http::message_should_close(req.version, req.headers) &&
+         !(resp.version.empty() ? true : http::message_should_close(resp.version, resp.headers));
 }
 
 }  // namespace openscanproxy::proxy
