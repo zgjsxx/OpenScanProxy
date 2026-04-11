@@ -65,11 +65,12 @@ audit::AuditEvent make_access_event(const std::string& timestamp, const std::str
                                     const std::string& url, const std::string& method, int status_code,
                                     std::uint64_t latency_ms, std::size_t bytes_in, std::size_t bytes_out,
                                     bool https_mitm, const std::string& user) {
+  const auto audit_user = user.empty() ? "-" : user;
   audit::AuditEvent event;
   event.event_type = "access";
   event.timestamp = timestamp;
   event.client_addr = client_addr;
-  event.user = user;
+  event.user = audit_user;
   event.host = host;
   event.url = url;
   event.method = method;
@@ -521,7 +522,7 @@ void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host,
       scan_event.event_type = "scan";
       scan_event.timestamp = core::now_iso8601();
       scan_event.client_addr = client_addr;
-      scan_event.user = user;
+      scan_event.user = user.empty() ? "-" : user;
       scan_event.host = host;
       scan_event.url = req.uri;
       scan_event.method = req.method;
@@ -571,7 +572,7 @@ void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host,
         scan_event.event_type = "scan";
         scan_event.timestamp = core::now_iso8601();
         scan_event.client_addr = client_addr;
-        scan_event.user = user;
+        scan_event.user = user.empty() ? "-" : user;
         scan_event.host = host;
         scan_event.url = req.uri;
         scan_event.method = req.method;
@@ -662,7 +663,7 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
     scan_event.event_type = "scan";
     scan_event.timestamp = core::now_iso8601();
     scan_event.client_addr = client_addr;
-    scan_event.user = user;
+    scan_event.user = user.empty() ? "-" : user;
     scan_event.host = host;
     scan_event.url = req.uri;
     scan_event.method = req.method;
@@ -772,7 +773,7 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
       scan_event.event_type = "scan";
       scan_event.timestamp = core::now_iso8601();
       scan_event.client_addr = client_addr;
-      scan_event.user = user;
+      scan_event.user = user.empty() ? "-" : user;
       scan_event.host = host;
       scan_event.url = req.uri;
       scan_event.method = req.method;
