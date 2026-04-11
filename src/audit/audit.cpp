@@ -35,6 +35,7 @@ std::string AuditLogger::to_json_line(const AuditEvent& e) const {
   os << "\"event_type\":\"" << core::json_escape(e.event_type) << "\",";
   os << "\"timestamp\":\"" << core::json_escape(e.timestamp) << "\",";
   os << "\"client_addr\":\"" << core::json_escape(e.client_addr) << "\",";
+  os << "\"user\":\"" << core::json_escape(e.user) << "\",";
   os << "\"host\":\"" << core::json_escape(e.host) << "\",";
   os << "\"url\":\"" << core::json_escape(e.url) << "\",";
   os << "\"method\":\"" << core::json_escape(e.method) << "\",";

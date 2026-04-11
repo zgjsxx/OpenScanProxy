@@ -17,6 +17,8 @@
   "suspicious_action": "log",
   "domain_whitelist": [],
   "domain_blacklist": [],
+  "user_whitelist": [],
+  "user_blacklist": [],
   "url_whitelist": [],
   "url_blacklist": [],
   "default_access_action": "allow",
@@ -28,5 +30,9 @@
   "audit_log_path": "./logs/audit.jsonl",
   "audit_recent_limit": 500,
   "admin_user": "admin",
-  "admin_password": "admin123"
+  "admin_password": "admin123",
+  "enable_proxy_auth": false,
+  "proxy_auth_user": "proxy",
+  "proxy_auth_password": "proxy123",
+  "proxy_users_file": "./configs/proxy_users.json"
 }

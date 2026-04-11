@@ -67,11 +67,17 @@ AppConfig ConfigLoader::load_from_file(const std::string& path) {
   GET_US("audit_recent_limit", audit_recent_limit);
   GET_S("admin_user", admin_user);
   GET_S("admin_password", admin_password);
+  GET_B("enable_proxy_auth", enable_proxy_auth);
+  GET_S("proxy_auth_user", proxy_auth_user);
+  GET_S("proxy_auth_password", proxy_auth_password);
+  GET_S("proxy_users_file", proxy_users_file);
 
   cfg.allowed_mime = parse_string_array(text, "allowed_mime");
   cfg.allowed_extensions = parse_string_array(text, "allowed_extensions");
   cfg.domain_whitelist = parse_string_array(text, "domain_whitelist");
   cfg.domain_blacklist = parse_string_array(text, "domain_blacklist");
+  cfg.user_whitelist = parse_string_array(text, "user_whitelist");
+  cfg.user_blacklist = parse_string_array(text, "user_blacklist");
   cfg.url_whitelist = parse_string_array(text, "url_whitelist");
   cfg.url_blacklist = parse_string_array(text, "url_blacklist");
   if (cfg.default_access_action != "allow" && cfg.default_access_action != "block") {

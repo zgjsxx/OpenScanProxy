@@ -7,11 +7,14 @@ OpenScanProxy 是一个面向安全网关场景的开源 C++ MVP 项目：它实
 ## 核心功能
 
 - HTTP 正向代理（基础转发）
+- 代理身份认证（Proxy-Authorization Basic）
 - HTTPS CONNECT 隧道（支持基础 MITM：按域名签发叶子证书并转发）
 - 文件识别与提取（上传/下载，完整缓冲模式）
 - 扫描器抽象接口（已实现 MockScanner + ClamAVScanner）
 - 策略执行（clean/infected/suspicious/error）
+- 访问策略支持按用户白/黑名单控制（需启用代理认证）
 - JSONL 审计日志
+- 审计日志记录代理用户身份（user）
 - 内置管理后台（登录、仪表盘、日志页、配置页、健康检查、metrics）
 
 ## 技术选型与依赖策略
@@ -101,6 +104,16 @@ cmake --build build -j
 ### 3) 浏览器配置代理
 
 将浏览器代理设置为：`127.0.0.1:8080`。
+
+如需开启代理鉴权（Basic）：
+- `enable_proxy_auth=true`
+- `proxy_auth_user`
+- `proxy_auth_password`
+- `proxy_users_file`（代理用户持久化文件，默认 `./configs/proxy_users.json`）
+
+未携带或鉴权失败将返回 `407 Proxy Authentication Required`。
+
+你也可以在管理后台 `/policy` 页面创建代理用户；创建后会自动启用代理鉴权，客户端首次访问会收到浏览器用户名/密码弹窗。创建/更新的用户会持久化写入 `proxy_users_file`。
 
 ## 生成本地 CA（用于 HTTPS MITM）
 

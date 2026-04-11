@@ -12,6 +12,7 @@ const filters = reactive({
   result: '',
   host: '',
   method: '',
+  user: '',
   status: '',
   path: '',
   time_from: '',
@@ -31,7 +32,7 @@ async function loadLogs() {
       limit: String(pager.pageSize),
       offset: String((pager.page - 1) * pager.pageSize),
     })
-    for (const k of ['q', 'action', 'result', 'host', 'method', 'status', 'path', 'time_from', 'time_to', 'event_type']) {
+    for (const k of ['q', 'action', 'result', 'host', 'method', 'user', 'status', 'path', 'time_from', 'time_to', 'event_type']) {
       const v = String(filters[k] || '').trim()
       if (v) p.set(k, v)
     }
