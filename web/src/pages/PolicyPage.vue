@@ -22,6 +22,12 @@
         <label>URL 黑名单（每行一条）
           <textarea v-model="accessForm.url_blacklist" rows="5"></textarea>
         </label>
+        <label>URL 分类白名单（每行一条，如 social / video）
+          <textarea v-model="accessForm.url_category_whitelist" rows="5"></textarea>
+        </label>
+        <label>URL 分类黑名单（每行一条，如 adult / gambling）
+          <textarea v-model="accessForm.url_category_blacklist" rows="5"></textarea>
+        </label>
       </div>
       <div class="row">
         <label>默认策略
@@ -79,6 +85,8 @@ const accessForm = ref({
   user_blacklist: '',
   url_whitelist: '',
   url_blacklist: '',
+  url_category_whitelist: '',
+  url_category_blacklist: '',
   default_access_action: 'allow',
 })
 const policyTest = ref({ user: '', host: '', url: '/', method: 'GET' })
@@ -105,6 +113,8 @@ async function load() {
       user_blacklist: (access.user_blacklist || []).join('\n'),
       url_whitelist: (access.url_whitelist || []).join('\n'),
       url_blacklist: (access.url_blacklist || []).join('\n'),
+      url_category_whitelist: (access.url_category_whitelist || []).join('\n'),
+      url_category_blacklist: (access.url_category_blacklist || []).join('\n'),
       default_access_action: access.default_access_action || 'allow',
     }
   } catch (e) {
@@ -131,6 +141,8 @@ async function saveAccessPolicy() {
       user_blacklist: asLines(accessForm.value.user_blacklist),
       url_whitelist: asLines(accessForm.value.url_whitelist),
       url_blacklist: asLines(accessForm.value.url_blacklist),
+      url_category_whitelist: asLines(accessForm.value.url_category_whitelist),
+      url_category_blacklist: asLines(accessForm.value.url_category_blacklist),
       default_access_action: accessForm.value.default_access_action,
     })
     message.value = '访问策略保存成功'

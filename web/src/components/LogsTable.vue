@@ -21,7 +21,7 @@
       <button @click="$emit('set-page', pager.page + 1)" :disabled="logs.length < pager.pageSize">下一页</button>
     </div>
     <table class="table">
-      <thead><tr><th>类型</th><th>时间</th><th>方法</th><th>状态</th><th>客户端</th><th>用户</th><th>主机</th><th>URL</th><th>文件</th><th>结果</th><th>动作</th><th>签名</th></tr></thead>
+      <thead><tr><th>类型</th><th>时间</th><th>方法</th><th>状态</th><th>客户端</th><th>用户</th><th>主机</th><th>URL</th><th>URL分类</th><th>文件</th><th>结果</th><th>动作</th><th>签名</th></tr></thead>
       <tbody>
         <tr v-for="(e, idx) in logs" :key="`${e.timestamp}-${idx}`">
           <td>{{ e.event_type || '' }}</td>
@@ -32,6 +32,7 @@
           <td>{{ e.user || '' }}</td>
           <td>{{ e.host || '' }}</td>
           <td>{{ e.url || '' }}</td>
+          <td>{{ e.url_category || '' }}</td>
           <td>{{ e.filename || '' }}</td>
           <td>{{ e.result || '' }}</td>
           <td><span class="pill" :class="e.action">{{ e.action }}</span></td>

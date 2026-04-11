@@ -28,6 +28,8 @@ struct AppConfig {
   std::vector<std::string> user_blacklist;
   std::vector<std::string> url_whitelist;
   std::vector<std::string> url_blacklist;
+  std::vector<std::string> url_category_whitelist;
+  std::vector<std::string> url_category_blacklist;
   std::string default_access_action{"allow"};
 
   std::uint64_t scan_timeout_ms{5000};

@@ -171,6 +171,8 @@ std::string access_policy_to_json(const proxy::Runtime& runtime) {
   os << "\"user_blacklist\":" << json_array(p.user_blacklist, true) << ",";
   os << "\"url_whitelist\":" << json_array(p.url_whitelist) << ",";
   os << "\"url_blacklist\":" << json_array(p.url_blacklist) << ",";
+  os << "\"url_category_whitelist\":" << json_array(p.url_category_whitelist, true) << ",";
+  os << "\"url_category_blacklist\":" << json_array(p.url_category_blacklist, true) << ",";
   os << "\"default_access_action\":\"" << policy::to_string(p.default_access_action) << "\"";
   os << "}";
   return os.str();
@@ -189,6 +191,7 @@ std::string logs_to_json(const std::vector<audit::AuditEvent>& logs) {
     os << "\"user\":\"" << core::json_escape(e.user) << "\",";
     os << "\"host\":\"" << core::json_escape(e.host) << "\",";
     os << "\"url\":\"" << core::json_escape(e.url) << "\",";
+    os << "\"url_category\":\"" << core::json_escape(e.url_category) << "\",";
     os << "\"method\":\"" << core::json_escape(e.method) << "\",";
     os << "\"status_code\":" << e.status_code << ",";
     os << "\"latency_ms\":" << e.latency_ms << ",";
@@ -421,10 +424,14 @@ void AdminServer::run() {
         p.user_blacklist = parse_string_array(body, "user_blacklist");
         p.url_whitelist = parse_string_array(body, "url_whitelist");
         p.url_blacklist = parse_string_array(body, "url_blacklist");
+        p.url_category_whitelist = parse_string_array(body, "url_category_whitelist");
+        p.url_category_blacklist = parse_string_array(body, "url_category_blacklist");
         for (auto& d : p.domain_whitelist) d = lower(core::trim(d));
         for (auto& d : p.domain_blacklist) d = lower(core::trim(d));
         for (auto& u : p.user_whitelist) u = lower(core::trim(u));
         for (auto& u : p.user_blacklist) u = lower(core::trim(u));
+        for (auto& c : p.url_category_whitelist) c = lower(core::trim(c));
+        for (auto& c : p.url_category_blacklist) c = lower(core::trim(c));
         if (kv.count("default_access_action")) {
           p.default_access_action = policy::access_action_from_string(kv["default_access_action"]);
         }
@@ -435,6 +442,8 @@ void AdminServer::run() {
         runtime_.config.user_blacklist = p.user_blacklist;
         runtime_.config.url_whitelist = p.url_whitelist;
         runtime_.config.url_blacklist = p.url_blacklist;
+        runtime_.config.url_category_whitelist = p.url_category_whitelist;
+        runtime_.config.url_category_blacklist = p.url_category_blacklist;
         runtime_.config.default_access_action = policy::to_string(p.default_access_action);
         resp = http_resp(200, "OK", access_policy_to_json(runtime_), "application/json");
       } else if (pure_path == "/api/policy/test" && method == "POST") {
@@ -451,6 +460,7 @@ void AdminServer::run() {
         out << "\"host\":\"" << core::json_escape(host) << "\",";
         out << "\"url\":\"" << core::json_escape(url) << "\",";
         out << "\"method\":\"" << core::json_escape(req_method) << "\",";
+        out << "\"url_category\":\"" << core::json_escape(r.url_category) << "\",";
         out << "\"matched_rule\":\"" << core::json_escape(r.matched_rule) << "\",";
         out << "\"matched_type\":\"" << core::json_escape(r.matched_type) << "\",";
         out << "\"reason\":\"" << core::json_escape(r.reason) << "\",";

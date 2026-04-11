@@ -39,7 +39,31 @@ bool find_matched_rule(const std::vector<std::string>& rules, const std::string&
   return false;
 }
 
+bool contains_any(const std::string& text, const std::vector<std::string>& needles) {
+  for (const auto& n : needles) {
+    if (!n.empty() && text.find(n) != std::string::npos) return true;
+  }
+  return false;
+}
+
 }  // namespace
+
+std::string classify_url(const std::string& host, const std::string& url) {
+  const auto host_l = core::to_lower(host);
+  const auto url_l = core::to_lower(url);
+  const auto text = host_l + " " + url_l;
+
+  if (contains_any(text, {"porn", "adult", "sex", "xvideos", "xnxx", "onlyfans"})) return "adult";
+  if (contains_any(text, {"casino", "bet", "gambl", "poker", "lottery", "slot"})) return "gambling";
+  if (contains_any(text, {"facebook", "twitter", "x.com", "instagram", "tiktok", "weibo", "reddit"})) return "social";
+  if (contains_any(text, {"youtube", "netflix", "bilibili", "twitch", "spotify", "douyin"})) return "video";
+  if (contains_any(text, {"github", "gitlab", "bitbucket", "npmjs", "pypi", "docker"})) return "developer";
+  if (contains_any(text, {"drive.google.com", "dropbox", "onedrive", "box.com", "mega.nz"})) return "cloud_storage";
+  if (contains_any(text, {"amazon", "taobao", "tmall", "ebay", "jd.com", "shop"})) return "shopping";
+  if (contains_any(text, {"bank", "pay", "wallet", "finance", "alipay", "paypal"})) return "finance";
+  if (contains_any(text, {"news", "cnn", "bbc", "reuters", "nytimes"})) return "news";
+  return "other";
+}
 
 core::Action PolicyEngine::decide(const core::ScanResult& result) const {
   auto cfg = config();
@@ -61,27 +85,34 @@ AccessPolicyResult PolicyEngine::evaluate_access(const std::string& host, const 
   auto cfg = config();
   const auto host_l = core::to_lower(host);
   const auto user_l = core::to_lower(user);
+  const auto category = classify_url(host, url);
   std::string hit;
 
   if (!user_l.empty() && find_matched_rule(cfg.user_whitelist, user_l, hit)) {
-    return {AccessAction::Allow, hit, "user_whitelist", "matched user whitelist"};
+    return {AccessAction::Allow, hit, "user_whitelist", "matched user whitelist", category};
   }
   if (!user_l.empty() && find_matched_rule(cfg.user_blacklist, user_l, hit)) {
-    return {AccessAction::Block, hit, "user_blacklist", "matched user blacklist"};
+    return {AccessAction::Block, hit, "user_blacklist", "matched user blacklist", category};
   }
   if (find_matched_rule(cfg.domain_whitelist, host_l, hit)) {
-    return {AccessAction::Allow, hit, "domain_whitelist", "matched domain whitelist"};
+    return {AccessAction::Allow, hit, "domain_whitelist", "matched domain whitelist", category};
   }
   if (find_matched_rule(cfg.url_whitelist, url, hit)) {
-    return {AccessAction::Allow, hit, "url_whitelist", "matched url whitelist"};
+    return {AccessAction::Allow, hit, "url_whitelist", "matched url whitelist", category};
+  }
+  if (find_matched_rule(cfg.url_category_whitelist, category, hit)) {
+    return {AccessAction::Allow, hit, "url_category_whitelist", "matched url category whitelist", category};
   }
   if (find_matched_rule(cfg.domain_blacklist, host_l, hit)) {
-    return {AccessAction::Block, hit, "domain_blacklist", "matched domain blacklist"};
+    return {AccessAction::Block, hit, "domain_blacklist", "matched domain blacklist", category};
   }
   if (find_matched_rule(cfg.url_blacklist, url, hit)) {
-    return {AccessAction::Block, hit, "url_blacklist", "matched url blacklist"};
+    return {AccessAction::Block, hit, "url_blacklist", "matched url blacklist", category};
   }
-  return {cfg.default_access_action, "", "default_access_action", "fallback to default access action"};
+  if (find_matched_rule(cfg.url_category_blacklist, category, hit)) {
+    return {AccessAction::Block, hit, "url_category_blacklist", "matched url category blacklist", category};
+  }
+  return {cfg.default_access_action, "", "default_access_action", "fallback to default access action", category};
 }
 
 PolicyConfig PolicyEngine::config() const {

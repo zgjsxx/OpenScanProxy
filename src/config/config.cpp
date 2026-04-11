@@ -84,6 +84,8 @@ AppConfig ConfigLoader::load_from_file(const std::string& path) {
   cfg.user_blacklist = parse_string_array(text, "user_blacklist");
   cfg.url_whitelist = parse_string_array(text, "url_whitelist");
   cfg.url_blacklist = parse_string_array(text, "url_blacklist");
+  cfg.url_category_whitelist = parse_string_array(text, "url_category_whitelist");
+  cfg.url_category_blacklist = parse_string_array(text, "url_category_blacklist");
   if (cfg.default_access_action != "allow" && cfg.default_access_action != "block") {
     cfg.default_access_action = "allow";
   }

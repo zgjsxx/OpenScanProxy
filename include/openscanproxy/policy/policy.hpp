@@ -19,6 +19,8 @@ struct PolicyConfig {
   std::vector<std::string> user_blacklist;
   std::vector<std::string> url_whitelist;
   std::vector<std::string> url_blacklist;
+  std::vector<std::string> url_category_whitelist;
+  std::vector<std::string> url_category_blacklist;
   AccessAction default_access_action{AccessAction::Allow};
 };
 
@@ -27,6 +29,7 @@ struct AccessPolicyResult {
   std::string matched_rule;
   std::string matched_type;
   std::string reason;
+  std::string url_category;
 };
 
 class PolicyEngine {
@@ -47,5 +50,6 @@ std::string to_string(core::ScanStatus status);
 std::string to_string(core::Action action);
 std::string to_string(AccessAction action);
 AccessAction access_action_from_string(const std::string& action);
+std::string classify_url(const std::string& host, const std::string& url);
 
 }  // namespace openscanproxy::policy
