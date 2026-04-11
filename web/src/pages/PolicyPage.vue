@@ -3,23 +3,23 @@
     <section class="policy-hero card">
       <div class="policy-hero-copy">
         <div class="eyebrow">Security Policy Workspace</div>
-        <h2>统一管理访问控制、检测策略与代理认证</h2>
+        <h2>按“全局名单、命中规则、默认规则”管理访问策略</h2>
         <p class="muted">
-          在同一页内完成核心策略开关、访问规则维护、策略验证和代理认证用户管理，减少配置分散带来的误操作。
+          先配置全局黑白名单，再维护对特定用户生效的访问规则，最后用默认规则兜底，整体更贴近企业常见的访问控制模型。
         </p>
       </div>
       <div class="policy-hero-metrics">
         <div class="metric-tile">
-          <span class="metric-label">默认动作</span>
+          <span class="metric-label">全局默认动作</span>
           <strong>{{ defaultActionLabel }}</strong>
+        </div>
+        <div class="metric-tile">
+          <span class="metric-label">策略规则数</span>
+          <strong>{{ accessRules.length }}</strong>
         </div>
         <div class="metric-tile">
           <span class="metric-label">故障处理</span>
           <strong>{{ policy.fail_open ? 'Fail-open' : 'Fail-close' }}</strong>
-        </div>
-        <div class="metric-tile">
-          <span class="metric-label">可疑文件</span>
-          <strong>{{ policy.block_suspicious ? '直接拦截' : '仅记录/放行' }}</strong>
         </div>
         <div class="metric-tile">
           <span class="metric-label">认证用户</span>
@@ -33,70 +33,149 @@
     <section class="card section-shell">
       <div class="section-head">
         <div>
-          <div class="section-kicker">Access Control Matrix</div>
-          <div class="section-title">访问策略矩阵</div>
+          <div class="section-kicker">Global Access Lists</div>
+          <div class="section-title">全局黑白名单</div>
         </div>
         <p class="muted section-note">
-          白名单与黑名单均按每行一条录入。分类规则示例：`social`、`video`、`adult`、`gambling`。
+          这部分优先于命中规则执行，适合放全局例外、企业统一放行项，以及必须统一阻断的站点或类别。
         </p>
       </div>
 
       <div class="policy-groups">
         <section class="subcard">
-          <div class="subcard-title">域名规则</div>
-          <div class="policy-field-grid">
-            <label class="field-block">
-              <span>域名白名单</span>
-              <textarea v-model="accessForm.domain_whitelist" rows="6" placeholder="example.com&#10;internal.company.local"></textarea>
-            </label>
-            <label class="field-block">
-              <span>域名黑名单</span>
-              <textarea v-model="accessForm.domain_blacklist" rows="6" placeholder="malware.example&#10;phishing.example"></textarea>
-            </label>
-          </div>
-        </section>
-
-        <section class="subcard">
-          <div class="subcard-title">用户规则</div>
+          <div class="subcard-title">全局用户名单</div>
           <div class="policy-field-grid">
             <label class="field-block">
               <span>用户白名单</span>
-              <textarea v-model="accessForm.user_whitelist" rows="6" placeholder="alice&#10;ops-admin"></textarea>
+              <textarea v-model="accessForm.user_whitelist" rows="5" placeholder="vip-user&#10;admin-user"></textarea>
             </label>
             <label class="field-block">
               <span>用户黑名单</span>
-              <textarea v-model="accessForm.user_blacklist" rows="6" placeholder="temp-user&#10;blocked-user"></textarea>
+              <textarea v-model="accessForm.user_blacklist" rows="5" placeholder="disabled-user&#10;risk-user"></textarea>
             </label>
           </div>
         </section>
 
         <section class="subcard">
-          <div class="subcard-title">URL 规则</div>
+          <div class="subcard-title">域名与 URL 名单</div>
           <div class="policy-field-grid">
             <label class="field-block">
+              <span>域名白名单</span>
+              <textarea v-model="accessForm.domain_whitelist" rows="5" placeholder="intranet.company.local&#10;trusted.example.com"></textarea>
+            </label>
+            <label class="field-block">
+              <span>域名黑名单</span>
+              <textarea v-model="accessForm.domain_blacklist" rows="5" placeholder="malware.example&#10;phishing.example"></textarea>
+            </label>
+            <label class="field-block">
               <span>URL 白名单</span>
-              <textarea v-model="accessForm.url_whitelist" rows="6" placeholder="/health&#10;/api/internal/status"></textarea>
+              <textarea v-model="accessForm.url_whitelist" rows="5" placeholder="/api/internal/*&#10;/health"></textarea>
             </label>
             <label class="field-block">
               <span>URL 黑名单</span>
-              <textarea v-model="accessForm.url_blacklist" rows="6" placeholder="/admin/debug&#10;/download/unsafe"></textarea>
+              <textarea v-model="accessForm.url_blacklist" rows="5" placeholder="/admin/debug&#10;/download/unsafe"></textarea>
             </label>
           </div>
         </section>
 
         <section class="subcard">
-          <div class="subcard-title">分类规则</div>
+          <div class="subcard-title">全局分类名单</div>
           <div class="policy-field-grid">
             <label class="field-block">
-              <span>URL 分类白名单</span>
-              <textarea v-model="accessForm.url_category_whitelist" rows="6" placeholder="social&#10;video"></textarea>
+              <span>分类白名单</span>
+              <textarea v-model="accessForm.url_category_whitelist" rows="5" placeholder="developer&#10;finance"></textarea>
             </label>
             <label class="field-block">
-              <span>URL 分类黑名单</span>
-              <textarea v-model="accessForm.url_category_blacklist" rows="6" placeholder="adult&#10;gambling"></textarea>
+              <span>分类黑名单</span>
+              <textarea v-model="accessForm.url_category_blacklist" rows="5" placeholder="adult&#10;gambling"></textarea>
             </label>
           </div>
         </section>
+      </div>
+    </section>
+
+    <section class="card section-shell">
+      <div class="section-head">
+        <div>
+          <div class="section-kicker">Per-user Rules</div>
+          <div class="section-title">命中规则</div>
+        </div>
+        <p class="muted section-note">
+          每条规则可绑定一个或多个用户，并对这些用户追加更细粒度的域名、URL 或分类访问控制。例如 user001 放行 game，user002 阻断 shopping。
+        </p>
+      </div>
+
+      <div class="rules-stack">
+        <article v-for="(rule, index) in accessRules" :key="rule.id" class="rule-card">
+          <div class="rule-card-head">
+            <div>
+              <div class="rule-index">Rule {{ index + 1 }}</div>
+              <input v-model="rule.name" class="rule-name-input" placeholder="例如：研发用户允许 developer / game" />
+            </div>
+            <button class="ghost danger-btn" @click="removeRule(index)">删除规则</button>
+          </div>
+
+          <div class="rule-grid">
+            <label class="field-block rule-users-field">
+              <span>生效用户</span>
+              <textarea v-model="rule.usersText" rows="4" placeholder="user001&#10;user002"></textarea>
+            </label>
+
+            <div class="rule-groups">
+              <div class="rule-mini-grid">
+                <label class="field-block">
+                  <span>允许分类</span>
+                  <textarea v-model="rule.urlCategoryWhitelistText" rows="4" placeholder="game&#10;developer"></textarea>
+                </label>
+                <label class="field-block">
+                  <span>阻断分类</span>
+                  <textarea v-model="rule.urlCategoryBlacklistText" rows="4" placeholder="shopping&#10;social"></textarea>
+                </label>
+              </div>
+              <div class="rule-mini-grid">
+                <label class="field-block">
+                  <span>允许域名</span>
+                  <textarea v-model="rule.domainWhitelistText" rows="4" placeholder="games.company.com"></textarea>
+                </label>
+                <label class="field-block">
+                  <span>阻断域名</span>
+                  <textarea v-model="rule.domainBlacklistText" rows="4" placeholder="shop.example.com"></textarea>
+                </label>
+              </div>
+              <div class="rule-mini-grid">
+                <label class="field-block">
+                  <span>允许 URL</span>
+                  <textarea v-model="rule.urlWhitelistText" rows="4" placeholder="/games/*"></textarea>
+                </label>
+                <label class="field-block">
+                  <span>阻断 URL</span>
+                  <textarea v-model="rule.urlBlacklistText" rows="4" placeholder="/shop/*"></textarea>
+                </label>
+              </div>
+            </div>
+          </div>
+        </article>
+
+        <div v-if="!accessRules.length" class="empty-rules muted">
+          还没有配置用户规则。你可以新增一条规则，让指定用户只允许或禁止访问某些类别、域名或 URL。
+        </div>
+      </div>
+
+      <div class="action-row rule-toolbar">
+        <button class="primary-btn" @click="addRule">新增规则</button>
+        <span class="muted">规则在全局名单之后匹配，未命中任何规则时走默认规则。</span>
+      </div>
+    </section>
+
+    <section class="card section-shell">
+      <div class="section-head">
+        <div>
+          <div class="section-kicker">Default Rule</div>
+          <div class="section-title">默认规则</div>
+        </div>
+        <p class="muted section-note">
+          当请求没有命中全局名单，也没有命中任何用户规则时，系统会按这里配置的默认动作处理。
+        </p>
       </div>
 
       <div class="policy-action-bar">
@@ -108,7 +187,7 @@
           </select>
         </label>
         <div class="policy-action-copy muted">
-          建议仅在白名单足够稳定时将默认动作切换为 `block`，以降低误拦截影响面。
+          如果你的规则是“按需放行”，默认策略建议设为 `block`；如果你的规则是“按需阻断”，默认策略建议设为 `allow`。
         </div>
         <div class="policy-action-controls">
           <span
@@ -118,7 +197,7 @@
               error: accessMessage && accessMessage.includes('失败'),
             }"
           >
-            {{ accessMessage || '访问控制规则变更后会即时提交到服务端。' }}
+            {{ accessMessage || '保存后将同时提交全局名单、用户规则和默认规则。' }}
           </span>
           <button class="primary-btn" @click="saveAccessPolicy">保存访问策略</button>
         </div>
@@ -132,20 +211,20 @@
             <div class="section-kicker">Policy Validation</div>
             <div class="section-title">访问测试</div>
           </div>
-          <p class="muted section-note">快速验证某个用户访问特定主机与路径时的策略命中结果。</p>
+          <p class="muted section-note">输入用户、主机和 URL，验证它最后命中了全局名单、哪条规则，还是默认规则。</p>
         </div>
         <div class="test-grid">
           <label class="field-block">
             <span>用户</span>
-            <input v-model="policyTest.user" placeholder="例如 alice" />
+            <input v-model="policyTest.user" placeholder="例如 user001" />
           </label>
           <label class="field-block">
             <span>主机</span>
-            <input v-model="policyTest.host" placeholder="例如 example.com" />
+            <input v-model="policyTest.host" placeholder="例如 steam.example.com" />
           </label>
           <label class="field-block">
             <span>URL</span>
-            <input v-model="policyTest.url" placeholder="例如 /admin" />
+            <input v-model="policyTest.url" placeholder="例如 /game/store" />
           </label>
           <label class="field-block">
             <span>Method</span>
@@ -164,9 +243,7 @@
             <div class="section-kicker">Proxy Authentication</div>
             <div class="section-title">代理认证用户管理</div>
           </div>
-          <p class="muted section-note">
-            首次访问代理时，浏览器会提示输入这里创建的用户名和密码。
-          </p>
+          <p class="muted section-note">首次访问代理时，浏览器会提示输入这里创建的用户名和密码。</p>
         </div>
 
         <div class="auth-state">
@@ -238,6 +315,7 @@ const accessForm = ref({
   url_category_blacklist: '',
   default_access_action: 'allow',
 })
+const accessRules = ref([])
 const policyTest = ref({ user: '', host: '', url: '/', method: 'GET' })
 const policyTestResult = ref('')
 const proxyUsers = ref({ enabled: false, users: [] })
@@ -248,10 +326,43 @@ const defaultActionLabel = computed(() =>
 )
 
 const asLines = (text) =>
-  text
+  String(text || '')
     .split('\n')
     .map((x) => x.trim())
     .filter(Boolean)
+
+const createEditableRule = (rule = {}) => ({
+  id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  name: rule.name || '',
+  usersText: (rule.users || []).join('\n'),
+  domainWhitelistText: (rule.domain_whitelist || []).join('\n'),
+  domainBlacklistText: (rule.domain_blacklist || []).join('\n'),
+  urlWhitelistText: (rule.url_whitelist || []).join('\n'),
+  urlBlacklistText: (rule.url_blacklist || []).join('\n'),
+  urlCategoryWhitelistText: (rule.url_category_whitelist || []).join('\n'),
+  urlCategoryBlacklistText: (rule.url_category_blacklist || []).join('\n'),
+})
+
+function addRule() {
+  accessRules.value.push(createEditableRule())
+}
+
+function removeRule(index) {
+  accessRules.value.splice(index, 1)
+}
+
+function serializeRules() {
+  return accessRules.value.map((rule, index) => ({
+    name: String(rule.name || '').trim() || `rule-${index + 1}`,
+    users: asLines(rule.usersText),
+    domain_whitelist: asLines(rule.domainWhitelistText),
+    domain_blacklist: asLines(rule.domainBlacklistText),
+    url_whitelist: asLines(rule.urlWhitelistText),
+    url_blacklist: asLines(rule.urlBlacklistText),
+    url_category_whitelist: asLines(rule.urlCategoryWhitelistText),
+    url_category_blacklist: asLines(rule.urlCategoryBlacklistText),
+  }))
+}
 
 async function load() {
   try {
@@ -270,6 +381,7 @@ async function load() {
       url_category_blacklist: (access.url_category_blacklist || []).join('\n'),
       default_access_action: access.default_access_action || 'allow',
     }
+    accessRules.value = (access.access_rules || []).map((rule) => createEditableRule(rule))
   } catch (e) {
     if (e.message === 'UNAUTHORIZED') router.push('/login')
   }
@@ -296,6 +408,7 @@ async function saveAccessPolicy() {
       url_blacklist: asLines(accessForm.value.url_blacklist),
       url_category_whitelist: asLines(accessForm.value.url_category_whitelist),
       url_category_blacklist: asLines(accessForm.value.url_category_blacklist),
+      access_rules: serializeRules(),
       default_access_action: accessForm.value.default_access_action,
     })
     accessMessage.value = '访问策略保存成功'

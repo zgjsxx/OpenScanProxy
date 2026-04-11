@@ -894,3 +894,97 @@ pre {
     font-size: 28px;
   }
 }
+.rule-toolbar {
+  margin-top: 18px;
+}
+
+.rules-stack {
+  display: grid;
+  gap: 14px;
+}
+
+.rule-card {
+  padding: 18px;
+  border-radius: 18px;
+  border: 1px solid rgba(135, 161, 196, 0.14);
+  background: rgba(10, 21, 36, 0.6);
+}
+
+.rule-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  margin-bottom: 16px;
+}
+
+.rule-index {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+
+.rule-name-input {
+  min-width: min(520px, 100%);
+}
+
+.rule-grid {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 16px;
+}
+
+.rule-groups {
+  display: grid;
+  gap: 12px;
+}
+
+.rule-mini-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.rule-users-field textarea {
+  min-height: 100%;
+}
+
+.empty-rules {
+  padding: 22px;
+  border: 1px dashed rgba(138, 160, 194, 0.22);
+  border-radius: 18px;
+  background: rgba(12, 24, 40, 0.35);
+  line-height: 1.65;
+}
+
+.danger-btn {
+  border-color: rgba(255, 143, 159, 0.22);
+  color: #ffb1bc;
+}
+
+.danger-btn:hover {
+  background: rgba(95, 22, 34, 0.28);
+}
+
+@media (max-width: 1260px) {
+  .rule-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 980px) {
+  .rule-mini-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .rule-card-head {
+    flex-direction: column;
+  }
+
+  .rule-name-input {
+    min-width: 100%;
+  }
+}
