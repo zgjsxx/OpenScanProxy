@@ -76,6 +76,28 @@ defineEmits(['refresh', 'set-page'])
   width: 160px;
 }
 
+.logs-table th,
+.logs-table td {
+  padding-left: 10px;
+  padding-right: 10px;
+}
+
+.logs-table td:nth-child(5),
+.logs-table td:nth-child(6) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  letter-spacing: 0.2px;
+}
+
+.logs-table th:nth-child(5),
+.logs-table td:nth-child(5) {
+  min-width: 170px;
+}
+
+.logs-table th:nth-child(6),
+.logs-table td:nth-child(6) {
+  min-width: 90px;
+}
+
 .url-cell {
   width: 260px;
 }

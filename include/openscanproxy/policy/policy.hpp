@@ -50,6 +50,7 @@ std::string to_string(core::ScanStatus status);
 std::string to_string(core::Action action);
 std::string to_string(AccessAction action);
 AccessAction access_action_from_string(const std::string& action);
+bool load_domain_categories_from_csv(const std::string& path);
 std::string classify_url(const std::string& host, const std::string& url);
 
 }  // namespace openscanproxy::policy

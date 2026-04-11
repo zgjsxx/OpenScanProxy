@@ -54,6 +54,7 @@ struct AppConfig {
   std::string proxy_auth_user{"proxy"};
   std::string proxy_auth_password{"proxy123"};
   std::string proxy_users_file{"./configs/proxy_users.json"};
+  std::string domain_category_data_file{"./configs/domain_categories.csv"};
 };
 
 class ConfigLoader {

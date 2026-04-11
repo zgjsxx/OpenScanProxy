@@ -18,6 +18,13 @@ int main(int argc, char** argv) {
     core::app_logger().configure(cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
     proxy::Runtime runtime(cfg);
 
+    if (policy::load_domain_categories_from_csv(cfg.domain_category_data_file)) {
+      core::app_logger().log(core::LogLevel::Info, "loaded domain categories from: " + cfg.domain_category_data_file);
+    } else {
+      core::app_logger().log(core::LogLevel::Warn,
+                             "failed to load domain categories from: " + cfg.domain_category_data_file);
+    }
+
     runtime.scan_ctx.timeout_ms = cfg.scan_timeout_ms;
     if (cfg.scanner_type == "clamav") {
       runtime.scanner = scanner::create_clamav_scanner(cfg.clamav_mode, cfg.clamav_unix_socket, cfg.clamav_host, cfg.clamav_port);

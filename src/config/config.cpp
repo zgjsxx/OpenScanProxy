@@ -75,6 +75,7 @@ AppConfig ConfigLoader::load_from_file(const std::string& path) {
   GET_S("proxy_auth_user", proxy_auth_user);
   GET_S("proxy_auth_password", proxy_auth_password);
   GET_S("proxy_users_file", proxy_users_file);
+  GET_S("domain_category_data_file", domain_category_data_file);
 
   cfg.allowed_mime = parse_string_array(text, "allowed_mime");
   cfg.allowed_extensions = parse_string_array(text, "allowed_extensions");
