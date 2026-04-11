@@ -1,6 +1,6 @@
 <template>
   <div class="row" style="flex-direction:column;align-items:stretch;">
-    <PolicySwitch :policy="policy" :message="message" @save="savePolicy" />
+    <PolicySwitch :policy="policy" :message="policyMessage" @save="savePolicy" />
     <div class="card">
       <h3>访问策略</h3>
       <div class="grid" style="grid-template-columns:1fr 1fr;">
@@ -37,6 +37,7 @@
           </select>
         </label>
         <button @click="saveAccessPolicy">保存访问策略</button>
+        <span class="muted">{{ accessMessage }}</span>
       </div>
     </div>
     <div class="card">
@@ -57,6 +58,7 @@
         <input v-model="newProxyUser.username" placeholder="用户名" />
         <input v-model="newProxyUser.password" placeholder="密码" type="password" />
         <button @click="createProxyUser">创建/更新用户</button>
+        <span class="muted">{{ proxyUserMessage }}</span>
       </div>
       <div class="muted" style="margin-top:8px">已启用：{{ proxyUsers.enabled ? '是' : '否' }}</div>
       <ul>
@@ -77,7 +79,9 @@ import SystemConfig from '../components/SystemConfig.vue'
 const router = useRouter()
 const policy = ref({ fail_open: false, block_suspicious: false })
 const config = ref({})
-const message = ref('')
+const policyMessage = ref('')
+const accessMessage = ref('')
+const proxyUserMessage = ref('')
 const accessForm = ref({
   domain_whitelist: '',
   domain_blacklist: '',
@@ -125,10 +129,10 @@ async function load() {
 async function savePolicy(payload) {
   try {
     await postJson('/api/policy', payload)
-    message.value = '保存成功'
+    policyMessage.value = 'Policy 保存成功'
     await load()
   } catch {
-    message.value = '保存失败'
+    policyMessage.value = 'Policy 保存失败'
   }
 }
 
@@ -145,10 +149,10 @@ async function saveAccessPolicy() {
       url_category_blacklist: asLines(accessForm.value.url_category_blacklist),
       default_access_action: accessForm.value.default_access_action,
     })
-    message.value = '访问策略保存成功'
+    accessMessage.value = '访问策略保存成功'
     await load()
   } catch {
-    message.value = '访问策略保存失败'
+    accessMessage.value = '访问策略保存失败'
   }
 }
 
@@ -165,10 +169,10 @@ async function createProxyUser() {
   try {
     await postJson('/api/proxy-users', newProxyUser.value)
     newProxyUser.value = { username: '', password: '' }
-    message.value = '代理用户保存成功'
+    proxyUserMessage.value = '代理用户保存成功'
     await load()
   } catch {
-    message.value = '代理用户保存失败'
+    proxyUserMessage.value = '代理用户保存失败'
   }
 }
 
