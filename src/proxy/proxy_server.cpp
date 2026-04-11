@@ -1,5 +1,6 @@
 #include "openscanproxy/proxy/proxy_server.hpp"
 
+#include "openscanproxy/core/logger.hpp"
 #include "openscanproxy/core/util.hpp"
 #include "openscanproxy/http/http_message.hpp"
 
@@ -18,7 +19,6 @@
 #include <sstream>
 #include <thread>
 #include <vector>
-#include <iostream>
 
 namespace openscanproxy::proxy {
 namespace {
@@ -135,6 +135,25 @@ std::string make_block_notification_response(const std::string& reason) {
      << "Cache-Control: no-store\r\n"
      << "Content-Length: " << body_s.size() << "\r\n\r\n"
      << body_s;
+  return os.str();
+}
+
+std::string format_request_headers_for_debug(const std::string& method, const std::string& target,
+                                             const std::map<std::string, std::string>& headers) {
+  std::ostringstream os;
+  os << "request " << method << " " << target << " headers={";
+  bool first = true;
+  for (const auto& [k, v] : headers) {
+    if (!first) os << ", ";
+    first = false;
+    auto key_lower = core::to_lower(k);
+    if (key_lower == "authorization" || key_lower == "proxy-authorization" || key_lower == "cookie") {
+      os << k << ":***";
+    } else {
+      os << k << ":" << v;
+    }
+  }
+  os << "}";
   return os.str();
 }
 
@@ -298,7 +317,7 @@ bool ssl_read_http_message(SSL* ssl, std::string& pending, std::string& raw_mess
 void ProxyServer::run() {
   int fd = socket(AF_INET, SOCK_STREAM, 0);
   if (fd < 0) {
-    std::cerr << "proxy: socket() failed" << std::endl;
+    core::app_logger().log(core::LogLevel::Error, "proxy: socket() failed");
     return;
   }
   int one = 1;
@@ -308,16 +327,20 @@ void ProxyServer::run() {
   addr.sin_port = htons(runtime_.config.proxy_listen_port);
   inet_pton(AF_INET, runtime_.config.proxy_listen_host.c_str(), &addr.sin_addr);
   if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-    std::cerr << "proxy: bind() failed on " << runtime_.config.proxy_listen_host << ":" << runtime_.config.proxy_listen_port << std::endl;
+    core::app_logger().log(core::LogLevel::Error,
+                           "proxy: bind() failed on " + runtime_.config.proxy_listen_host + ":" +
+                               std::to_string(runtime_.config.proxy_listen_port));
     close(fd);
     return;
   }
   if (listen(fd, 128) != 0) {
-    std::cerr << "proxy: listen() failed" << std::endl;
+    core::app_logger().log(core::LogLevel::Error, "proxy: listen() failed");
     close(fd);
     return;
   }
-  std::cout << "proxy listening on " << runtime_.config.proxy_listen_host << ":" << runtime_.config.proxy_listen_port << std::endl;
+  core::app_logger().log(core::LogLevel::Info,
+                         "proxy listening on " + runtime_.config.proxy_listen_host + ":" +
+                             std::to_string(runtime_.config.proxy_listen_port));
 
   while (true) {
     sockaddr_in caddr{};
@@ -331,10 +354,11 @@ void ProxyServer::run() {
       try {
         handle_client(cfd, client_addr);
       } catch (const std::exception& ex) {
-        std::cerr << "proxy: unhandled client error from " << client_addr << ": " << ex.what() << std::endl;
+        core::app_logger().log(core::LogLevel::Error,
+                               "proxy: unhandled client error from " + client_addr + ": " + ex.what());
         close(cfd);
       } catch (...) {
-        std::cerr << "proxy: unknown client error from " << client_addr << std::endl;
+        core::app_logger().log(core::LogLevel::Error, "proxy: unknown client error from " + client_addr);
         close(cfd);
       }
     }).detach();
@@ -379,6 +403,9 @@ void ProxyServer::handle_client(int cfd, const std::string& client_addr) {
       headers[core::trim(hline.substr(0, pos))] = core::trim(hline.substr(pos + 1));
     }
     auto is_chunked = has_chunked_encoding(headers);
+    if (core::app_logger().should_log(core::LogLevel::Debug)) {
+      core::app_logger().log(core::LogLevel::Debug, format_request_headers_for_debug(method, target, headers));
+    }
     if (!is_chunked && !parse_content_length_header(headers, content_length)) break;
 
     if (is_chunked) {

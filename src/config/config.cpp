@@ -65,6 +65,10 @@ AppConfig ConfigLoader::load_from_file(const std::string& path) {
   GET_U16("clamav_port", clamav_port);
   GET_S("audit_log_path", audit_log_path);
   GET_US("audit_recent_limit", audit_recent_limit);
+  GET_S("app_log_path", app_log_path);
+  GET_S("app_log_level", app_log_level);
+  GET_US("app_log_max_files", app_log_max_files);
+  GET_US("app_log_max_size_mb", app_log_max_size_mb);
   GET_S("admin_user", admin_user);
   GET_S("admin_password", admin_password);
   GET_B("enable_proxy_auth", enable_proxy_auth);

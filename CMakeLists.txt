@@ -10,6 +10,7 @@ find_package(OpenSSL REQUIRED)
 add_executable(openscanproxy
   cmd/openscanproxy/main.cpp
   src/core/util.cpp
+  src/core/logger.cpp
   src/config/config.cpp
   src/http/http_message.cpp
   src/extractor/extractor.cpp
