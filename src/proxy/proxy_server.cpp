@@ -228,6 +228,69 @@ bool parse_response_head(const std::string& raw_head, std::string& version, int&
   return true;
 }
 
+bool ssl_write_all(SSL* ssl, const char* data, std::size_t size) {
+  std::size_t sent = 0;
+  while (sent < size) {
+    int n = SSL_write(ssl, data + sent, static_cast<int>(size - sent));
+    if (n <= 0) return false;
+    sent += static_cast<std::size_t>(n);
+  }
+  return true;
+}
+
+bool ssl_read_http_message(SSL* ssl, std::string& pending, std::string& raw_message) {
+  raw_message.clear();
+  char buf[8192];
+  while (pending.find("\r\n\r\n") == std::string::npos) {
+    auto n = SSL_read(ssl, buf, sizeof(buf));
+    if (n <= 0) return false;
+    pending.append(buf, static_cast<std::size_t>(n));
+  }
+
+  auto header_end = pending.find("\r\n\r\n");
+  auto line_end = pending.find("\r\n");
+  if (line_end == std::string::npos || line_end > header_end) return false;
+
+  std::size_t content_length = 0;
+  std::map<std::string, std::string> headers;
+  std::istringstream hs(pending.substr(line_end + 2, header_end - line_end - 2));
+  std::string hline;
+  while (std::getline(hs, hline)) {
+    if (!hline.empty() && hline.back() == '\r') hline.pop_back();
+    if (hline.empty()) continue;
+    auto pos = hline.find(':');
+    if (pos == std::string::npos) return false;
+    headers[core::trim(hline.substr(0, pos))] = core::trim(hline.substr(pos + 1));
+  }
+
+  auto chunked = has_chunked_encoding(headers);
+  if (!chunked && !parse_content_length_header(headers, content_length)) return false;
+
+  if (chunked) {
+    while (pending.find("\r\n0\r\n\r\n", header_end + 4) == std::string::npos) {
+      auto n = SSL_read(ssl, buf, sizeof(buf));
+      if (n <= 0) return false;
+      pending.append(buf, static_cast<std::size_t>(n));
+    }
+    auto msg_end = pending.find("\r\n0\r\n\r\n", header_end + 4);
+    msg_end += 7;
+    raw_message = pending.substr(0, msg_end);
+    pending.erase(0, msg_end);
+    return true;
+  }
+
+  auto expected = header_end + 4 + content_length;
+  while (pending.size() < expected) {
+    auto n = SSL_read(ssl, buf, sizeof(buf));
+    if (n <= 0) return false;
+    pending.append(buf, static_cast<std::size_t>(n));
+  }
+
+  raw_message = pending.substr(0, expected);
+  pending.erase(0, expected);
+  return true;
+}
+
 }  // namespace
 
 void ProxyServer::run() {
@@ -379,10 +442,10 @@ void ProxyServer::handle_connect_tunnel(int cfd, const std::string& target, cons
   }
 
   runtime_.stats.inc_https_mitm_requests();
-  handle_connect_mitm(cfd, sfd, host);
+  handle_connect_mitm(cfd, sfd, host, client_addr, user);
 }
 
-void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host) {
+void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host, const std::string& client_addr, const std::string& user) {
   std::unique_ptr<SSL_CTX, void (*)(SSL_CTX*)> host_ctx(runtime_.tls_mitm.create_server_ctx_for_host(host), SSL_CTX_free);
   if (!host_ctx) {
     close(sfd);
@@ -411,27 +474,113 @@ void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host)
     return;
   }
 
-  std::mutex write_lock_client;
-  std::mutex write_lock_upstream;
-  auto relay_tls = [&](SSL* from, SSL* to, std::mutex& write_lock) {
-    char buf[8192];
-    while (true) {
-      int n = SSL_read(from, buf, sizeof(buf));
-      if (n <= 0) break;
-      int off = 0;
-      while (off < n) {
-        std::lock_guard<std::mutex> g(write_lock);
-        int w = SSL_write(to, buf + off, n - off);
-        if (w <= 0) return;
-        off += w;
+  std::string client_pending;
+  std::string upstream_pending;
+  while (true) {
+    std::string raw_req;
+    if (!ssl_read_http_message(client_ssl, client_pending, raw_req)) break;
+
+    http::HttpRequest req;
+    if (!http::parse_request(raw_req, req)) break;
+    for (auto& f : runtime_.extractor.from_request(req, host)) {
+      if (f.bytes.size() > runtime_.config.max_scan_file_size) continue;
+      auto result = runtime_.scanner->scan(f, runtime_.scan_ctx);
+      auto action = runtime_.policy.decide(result);
+      runtime_.stats.inc_scanned_files();
+      if (result.status == core::ScanStatus::Clean) runtime_.stats.inc_clean();
+      else if (result.status == core::ScanStatus::Infected) runtime_.stats.inc_infected();
+      else if (result.status == core::ScanStatus::Suspicious) runtime_.stats.inc_suspicious();
+      else runtime_.stats.inc_scanner_error();
+      if (action == core::Action::Block) runtime_.stats.inc_blocked();
+
+      audit::AuditEvent scan_event;
+      scan_event.event_type = "scan";
+      scan_event.timestamp = core::now_iso8601();
+      scan_event.client_addr = client_addr;
+      scan_event.user = user;
+      scan_event.host = host;
+      scan_event.url = req.uri;
+      scan_event.method = req.method;
+      scan_event.filename = f.filename;
+      scan_event.file_size = f.bytes.size();
+      scan_event.mime = f.mime;
+      scan_event.sha256 = core::sha256_hex(f.bytes);
+      scan_event.scanner = result.scanner_name;
+      scan_event.result = policy::to_string(result.status);
+      scan_event.signature = result.signature;
+      scan_event.action = policy::to_string(action);
+      scan_event.rule_hit = result.signature;
+      scan_event.decision_source = "policy_https_mitm_request";
+      runtime_.audit.write(scan_event);
+
+      if (action == core::Action::Block) {
+        auto r = make_block_notification_response("Threat detected: " + result.signature);
+        ssl_write_all(client_ssl, r.data(), r.size());
+        SSL_shutdown(client_ssl);
+        SSL_shutdown(upstream_ssl);
+        SSL_free(client_ssl);
+        SSL_free(upstream_ssl);
+        close(sfd);
+        return;
       }
     }
-  };
 
-  std::thread t1(relay_tls, client_ssl, upstream_ssl, std::ref(write_lock_upstream));
-  std::thread t2(relay_tls, upstream_ssl, client_ssl, std::ref(write_lock_client));
-  t1.join();
-  t2.join();
+    if (!ssl_write_all(upstream_ssl, raw_req.data(), raw_req.size())) break;
+
+    std::string raw_resp;
+    if (!ssl_read_http_message(upstream_ssl, upstream_pending, raw_resp)) break;
+
+    http::HttpResponse resp;
+    if (http::parse_response(raw_resp, resp)) {
+      for (auto& f : runtime_.extractor.from_response(req, resp, host)) {
+        if (f.bytes.size() > runtime_.config.max_scan_file_size) continue;
+        auto result = runtime_.scanner->scan(f, runtime_.scan_ctx);
+        auto action = runtime_.policy.decide(result);
+        runtime_.stats.inc_scanned_files();
+        if (result.status == core::ScanStatus::Clean) runtime_.stats.inc_clean();
+        else if (result.status == core::ScanStatus::Infected) runtime_.stats.inc_infected();
+        else if (result.status == core::ScanStatus::Suspicious) runtime_.stats.inc_suspicious();
+        else runtime_.stats.inc_scanner_error();
+        if (action == core::Action::Block) runtime_.stats.inc_blocked();
+
+        audit::AuditEvent scan_event;
+        scan_event.event_type = "scan";
+        scan_event.timestamp = core::now_iso8601();
+        scan_event.client_addr = client_addr;
+        scan_event.user = user;
+        scan_event.host = host;
+        scan_event.url = req.uri;
+        scan_event.method = req.method;
+        scan_event.status_code = resp.status;
+        scan_event.filename = f.filename;
+        scan_event.file_size = f.bytes.size();
+        scan_event.mime = f.mime;
+        scan_event.sha256 = core::sha256_hex(f.bytes);
+        scan_event.scanner = result.scanner_name;
+        scan_event.result = policy::to_string(result.status);
+        scan_event.signature = result.signature;
+        scan_event.action = policy::to_string(action);
+        scan_event.rule_hit = result.signature;
+        scan_event.decision_source = "policy_https_mitm_response";
+        runtime_.audit.write(scan_event);
+
+        if (action == core::Action::Block) {
+          auto r = make_block_notification_response("Threat detected: " + result.signature);
+          ssl_write_all(client_ssl, r.data(), r.size());
+          SSL_shutdown(client_ssl);
+          SSL_shutdown(upstream_ssl);
+          SSL_free(client_ssl);
+          SSL_free(upstream_ssl);
+          close(sfd);
+          return;
+        }
+      }
+    }
+
+    if (!ssl_write_all(client_ssl, raw_resp.data(), raw_resp.size())) break;
+
+    if (http::message_should_close(req.version, req.headers) || http::message_should_close(resp.version, resp.headers)) break;
+  }
 
   SSL_shutdown(client_ssl);
   SSL_shutdown(upstream_ssl);
