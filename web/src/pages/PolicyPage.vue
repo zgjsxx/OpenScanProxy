@@ -100,9 +100,9 @@
           <div class="section-kicker">Per-user Rules</div>
           <div class="section-title">命中规则</div>
         </div>
-        <p class="muted section-note">
-          每条规则可绑定一个或多个用户，并对这些用户追加更细粒度的域名、URL 或分类访问控制。例如 user001 放行 game，user002 阻断 shopping。
-        </p>
+          <p class="muted section-note">
+            每条规则只表达一组命中条件和一个最终动作。例如：用户 test001，分类为 game，域名为 example.com，最终 action 为 allow。
+          </p>
       </div>
 
       <div class="rules-stack">
@@ -110,7 +110,7 @@
           <div class="rule-card-head">
             <div>
               <div class="rule-index">Rule {{ index + 1 }}</div>
-              <input v-model="rule.name" class="rule-name-input" placeholder="例如：研发用户允许 developer / game" />
+              <input v-model="rule.name" class="rule-name-input" placeholder="例如：test001 访问 game.example.com 放行" />
             </div>
             <button class="ghost danger-btn" @click="removeRule(index)">删除规则</button>
           </div>
@@ -118,46 +118,44 @@
           <div class="rule-grid">
             <label class="field-block rule-users-field">
               <span>生效用户</span>
-              <textarea v-model="rule.usersText" rows="4" placeholder="user001&#10;user002"></textarea>
+              <textarea v-model="rule.usersText" rows="4" placeholder="test001"></textarea>
             </label>
 
             <div class="rule-groups">
               <div class="rule-mini-grid">
                 <label class="field-block">
-                  <span>允许分类</span>
-                  <textarea v-model="rule.urlCategoryWhitelistText" rows="4" placeholder="game&#10;developer"></textarea>
-                </label>
-                <label class="field-block">
-                  <span>阻断分类</span>
-                  <textarea v-model="rule.urlCategoryBlacklistText" rows="4" placeholder="shopping&#10;social"></textarea>
+                  <span>命中分类</span>
+                  <textarea v-model="rule.urlCategoryText" rows="4" placeholder="game"></textarea>
                 </label>
               </div>
               <div class="rule-mini-grid">
                 <label class="field-block">
-                  <span>允许域名</span>
-                  <textarea v-model="rule.domainWhitelistText" rows="4" placeholder="games.company.com"></textarea>
+                  <span>命中域名</span>
+                  <textarea v-model="rule.domainText" rows="4" placeholder="example.com"></textarea>
                 </label>
                 <label class="field-block">
-                  <span>阻断域名</span>
-                  <textarea v-model="rule.domainBlacklistText" rows="4" placeholder="shop.example.com"></textarea>
+                  <span>命中 URL</span>
+                  <textarea v-model="rule.urlText" rows="4" placeholder="/game/*"></textarea>
                 </label>
               </div>
               <div class="rule-mini-grid">
                 <label class="field-block">
-                  <span>允许 URL</span>
-                  <textarea v-model="rule.urlWhitelistText" rows="4" placeholder="/games/*"></textarea>
+                  <span>Action</span>
+                  <select v-model="rule.action" class="rule-action-select">
+                    <option value="allow">allow</option>
+                    <option value="block">block</option>
+                  </select>
                 </label>
-                <label class="field-block">
-                  <span>阻断 URL</span>
-                  <textarea v-model="rule.urlBlacklistText" rows="4" placeholder="/shop/*"></textarea>
-                </label>
+                <div class="rule-action-hint muted">
+                  命中这条规则后，系统会按这里的 action 直接放行或阻断。
+                </div>
               </div>
             </div>
           </div>
         </article>
 
         <div v-if="!accessRules.length" class="empty-rules muted">
-          还没有配置用户规则。你可以新增一条规则，让指定用户只允许或禁止访问某些类别、域名或 URL。
+          还没有配置用户规则。你可以新增一条规则，指定用户、命中条件和最终 action。
         </div>
       </div>
 
@@ -335,12 +333,13 @@ const createEditableRule = (rule = {}) => ({
   id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
   name: rule.name || '',
   usersText: (rule.users || []).join('\n'),
-  domainWhitelistText: (rule.domain_whitelist || []).join('\n'),
-  domainBlacklistText: (rule.domain_blacklist || []).join('\n'),
-  urlWhitelistText: (rule.url_whitelist || []).join('\n'),
-  urlBlacklistText: (rule.url_blacklist || []).join('\n'),
-  urlCategoryWhitelistText: (rule.url_category_whitelist || []).join('\n'),
-  urlCategoryBlacklistText: (rule.url_category_blacklist || []).join('\n'),
+  domainText: ((rule.domain_whitelist && rule.domain_whitelist.length ? rule.domain_whitelist : rule.domain_blacklist) || []).join('\n'),
+  urlText: ((rule.url_whitelist && rule.url_whitelist.length ? rule.url_whitelist : rule.url_blacklist) || []).join('\n'),
+  urlCategoryText: ((rule.url_category_whitelist && rule.url_category_whitelist.length ? rule.url_category_whitelist : rule.url_category_blacklist) || []).join('\n'),
+  action:
+    rule.domain_whitelist?.length || rule.url_whitelist?.length || rule.url_category_whitelist?.length
+      ? 'allow'
+      : 'block',
 })
 
 function addRule() {
@@ -355,12 +354,12 @@ function serializeRules() {
   return accessRules.value.map((rule, index) => ({
     name: String(rule.name || '').trim() || `rule-${index + 1}`,
     users: asLines(rule.usersText),
-    domain_whitelist: asLines(rule.domainWhitelistText),
-    domain_blacklist: asLines(rule.domainBlacklistText),
-    url_whitelist: asLines(rule.urlWhitelistText),
-    url_blacklist: asLines(rule.urlBlacklistText),
-    url_category_whitelist: asLines(rule.urlCategoryWhitelistText),
-    url_category_blacklist: asLines(rule.urlCategoryBlacklistText),
+    domain_whitelist: rule.action === 'allow' ? asLines(rule.domainText) : [],
+    domain_blacklist: rule.action === 'block' ? asLines(rule.domainText) : [],
+    url_whitelist: rule.action === 'allow' ? asLines(rule.urlText) : [],
+    url_blacklist: rule.action === 'block' ? asLines(rule.urlText) : [],
+    url_category_whitelist: rule.action === 'allow' ? asLines(rule.urlCategoryText) : [],
+    url_category_blacklist: rule.action === 'block' ? asLines(rule.urlCategoryText) : [],
   }))
 }
 
