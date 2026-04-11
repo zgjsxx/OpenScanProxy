@@ -3,6 +3,7 @@
 #include "openscanproxy/core/types.hpp"
 
 #include <deque>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -36,15 +37,24 @@ struct AuditEvent {
 
 class AuditLogger {
  public:
-  explicit AuditLogger(std::string log_path, std::size_t recent_limit = 500);
+  explicit AuditLogger(std::string log_path,
+                       std::size_t recent_limit = 500,
+                       std::size_t max_file_size_bytes = 10 * 1024 * 1024,
+                       std::size_t max_files = 5);
   void write(const AuditEvent& event);
   std::vector<AuditEvent> latest(std::size_t n) const;
 
  private:
+  std::string current_log_file_path() const;
+  static std::string date_suffix_utc();
+  static bool has_expected_extension(const std::filesystem::path& path, const std::string& ext);
+  void cleanup_old_files() const;
   std::string to_json_line(const AuditEvent& e) const;
 
   std::string log_path_;
   std::size_t recent_limit_{500};
+  std::size_t max_file_size_bytes_{10 * 1024 * 1024};
+  std::size_t max_files_{5};
   mutable std::mutex mu_;
   std::deque<AuditEvent> recent_;
 };

@@ -42,6 +42,8 @@ struct AppConfig {
 
   std::string audit_log_path{"./logs/audit.jsonl"};
   std::size_t audit_recent_limit{500};
+  std::size_t audit_max_file_size_bytes{10 * 1024 * 1024};
+  std::size_t audit_max_files{5};
   std::string admin_user{"admin"};
   std::string admin_password{"admin123"};
   bool enable_proxy_auth{false};

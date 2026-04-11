@@ -29,6 +29,8 @@
   "clamav_port": 3310,
   "audit_log_path": "./logs/audit.jsonl",
   "audit_recent_limit": 500,
+  "audit_max_file_size_bytes": 10485760,
+  "audit_max_files": 5,
   "admin_user": "admin",
   "admin_password": "admin123",
   "enable_proxy_auth": false,

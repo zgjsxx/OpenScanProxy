@@ -132,7 +132,10 @@ struct Runtime {
                                     config.url_whitelist,
                                     config.url_blacklist,
                                     policy::access_action_from_string(config.default_access_action)}),
-        audit(config.audit_log_path, config.audit_recent_limit) {}
+        audit(config.audit_log_path,
+              config.audit_recent_limit,
+              config.audit_max_file_size_bytes,
+              config.audit_max_files) {}
 };
 
 }  // namespace openscanproxy::proxy

@@ -115,6 +115,11 @@ cmake --build build -j
 
 你也可以在管理后台 `/policy` 页面创建代理用户；创建后会自动启用代理鉴权，客户端首次访问会收到浏览器用户名/密码弹窗。创建/更新的用户会持久化写入 `proxy_users_file`。
 
+审计日志默认写入 `audit_log_path`，并支持文件轮转：
+- 按天分文件（UTC 日期）
+- 单文件大小达到 `audit_max_file_size_bytes` 后继续写下一个分片
+- 仅保留最近 `audit_max_files` 个日志文件（默认 5）
+
 ## 生成本地 CA（用于 HTTPS MITM）
 
 ```bash
