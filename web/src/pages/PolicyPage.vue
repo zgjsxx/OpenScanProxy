@@ -1,9 +1,10 @@
 <template>
-  <div class="row" style="flex-direction:column;align-items:stretch;">
+  <div class="panel-stack">
     <PolicySwitch :policy="policy" :message="policyMessage" @save="savePolicy" />
+
     <div class="card">
-      <h3>访问策略</h3>
-      <div class="grid" style="grid-template-columns:1fr 1fr;">
+      <div class="section-title">访问策略矩阵</div>
+      <div class="grid two-col-grid">
         <label>域名白名单（每行一条）
           <textarea v-model="accessForm.domain_whitelist" rows="5"></textarea>
         </label>
@@ -40,8 +41,9 @@
         <span class="muted">{{ accessMessage }}</span>
       </div>
     </div>
+
     <div class="card">
-      <h3>访问测试</h3>
+      <div class="section-title">访问测试</div>
       <div class="row">
         <input v-model="policyTest.user" placeholder="user，如 alice" />
         <input v-model="policyTest.host" placeholder="host，如 example.com" />
@@ -51,8 +53,9 @@
       </div>
       <pre v-if="policyTestResult">{{ policyTestResult }}</pre>
     </div>
+
     <div class="card">
-      <h3>代理认证用户管理</h3>
+      <div class="section-title">代理认证用户管理</div>
       <div class="muted">首次访问代理时，浏览器会弹窗要求输入这里创建的用户名和密码。</div>
       <div class="row" style="margin-top:8px">
         <input v-model="newProxyUser.username" placeholder="用户名" />
@@ -65,6 +68,7 @@
         <li v-for="u in proxyUsers.users" :key="u.username">{{ u.username }}</li>
       </ul>
     </div>
+
     <SystemConfig :config="config" />
   </div>
 </template>
