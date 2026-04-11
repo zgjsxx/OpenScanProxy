@@ -459,7 +459,7 @@ void ProxyServer::handle_connect_tunnel(int cfd, const std::string& target, cons
   auto start = std::chrono::steady_clock::now();
   auto [host, port] = split_host_port(target, 443);
   auto access = runtime_.policy.evaluate_access(host, target, "CONNECT", user);
-  if (access.action == policy::AccessAction::Block) {
+  if (access.action == policy::AccessAction::Block && !runtime_.config.enable_https_mitm) {
     auto r = make_block_notification_response(access.reason);
     send(cfd, r.data(), r.size(), 0);
     runtime_.stats.inc_blocked();
@@ -535,6 +535,24 @@ void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host,
 
     http::HttpRequest req;
     if (!http::parse_request(raw_req, req)) break;
+    auto access = runtime_.policy.evaluate_access(host, req.uri, req.method, user);
+    if (access.action == policy::AccessAction::Block) {
+      auto r = make_block_notification_response(access.reason);
+      ssl_write_all(client_ssl, r.data(), r.size());
+      runtime_.stats.inc_blocked();
+      auto event = make_access_event(core::now_iso8601(), client_addr, host, req.uri, req.method, 403, 0, raw_req.size(), r.size(), true, user);
+      event.action = "block";
+      event.rule_hit = access.matched_rule;
+      event.decision_source = access.matched_type;
+      runtime_.audit.write(event);
+      SSL_shutdown(client_ssl);
+      SSL_shutdown(upstream_ssl);
+      SSL_free(client_ssl);
+      SSL_free(upstream_ssl);
+      close(sfd);
+      return;
+    }
+
     for (auto& f : runtime_.extractor.from_request(req, host)) {
       if (f.bytes.size() > runtime_.config.max_scan_file_size) continue;
       auto result = runtime_.scanner->scan(f, runtime_.scan_ctx);
