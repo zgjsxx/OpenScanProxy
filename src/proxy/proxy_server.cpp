@@ -676,7 +676,8 @@ void ProxyServer::handle_client(int cfd, const std::string& client_addr) {
 void ProxyServer::handle_connect_tunnel(int cfd, const std::string& target, const std::string& client_addr, const std::string& user) {
   auto start = std::chrono::steady_clock::now();
   auto [host, port] = split_host_port(target, 443);
-  if (runtime_.config.enable_proxy_auth && user.empty() && !runtime_.config.enable_https_mitm) {
+  const auto portal_target = target_is_portal_endpoint(runtime_, host, port);
+  if (runtime_.config.enable_proxy_auth && !portal_target && user.empty() && !runtime_.config.enable_https_mitm) {
     auto response = make_proxy_auth_required_response();
     send(cfd, response.data(), response.size(), 0);
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
@@ -687,8 +688,8 @@ void ProxyServer::handle_connect_tunnel(int cfd, const std::string& target, cons
     runtime_.audit.write(denied);
     return;
   }
-  auto access = runtime_.policy.evaluate_access(host, target, "CONNECT", user);
-  if (access.action == policy::AccessAction::Block && !runtime_.config.enable_https_mitm) {
+  auto access = portal_target ? policy::AccessDecision{} : runtime_.policy.evaluate_access(host, target, "CONNECT", user);
+  if (!portal_target && access.action == policy::AccessAction::Block && !runtime_.config.enable_https_mitm) {
     auto r = make_block_notification_response(access.reason, access.matched_rule, access.matched_type);
     send(cfd, r.data(), r.size(), 0);
     runtime_.stats.inc_blocked();
@@ -715,9 +716,9 @@ void ProxyServer::handle_connect_tunnel(int cfd, const std::string& target, cons
   send(cfd, ok.data(), ok.size(), 0);
   auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
   runtime_.audit.write(make_access_event(core::now_iso8601(), client_addr, host, target, "CONNECT", 200, ms, 0, ok.size(),
-                                         runtime_.config.enable_https_mitm, user));
+                                         runtime_.config.enable_https_mitm && !portal_target, user));
 
-  if (!runtime_.config.enable_https_mitm) {
+  if (!runtime_.config.enable_https_mitm || portal_target) {
     relay_bidirectional(cfd, sfd);
     close(sfd);
     return;
