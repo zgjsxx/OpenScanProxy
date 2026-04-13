@@ -5,12 +5,14 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <openssl/ssl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <cctype>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <thread>
 
@@ -20,6 +22,56 @@ namespace {
 std::string lower(std::string s) {
   std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
   return s;
+}
+
+bool ssl_write_all(SSL* ssl, const char* data, std::size_t size) {
+  std::size_t sent = 0;
+  while (sent < size) {
+    int n = SSL_write(ssl, data + sent, static_cast<int>(size - sent));
+    if (n <= 0) return false;
+    sent += static_cast<std::size_t>(n);
+  }
+  return true;
+}
+
+bool read_http_message_over_ssl(SSL* ssl, std::string& raw_message) {
+  raw_message.clear();
+  std::string pending;
+  char buf[8192];
+  while (pending.find("\r\n\r\n") == std::string::npos) {
+    int n = SSL_read(ssl, buf, sizeof(buf));
+    if (n <= 0) return false;
+    pending.append(buf, static_cast<std::size_t>(n));
+  }
+
+  auto header_end = pending.find("\r\n\r\n");
+  std::size_t content_length = 0;
+  std::istringstream hs(pending.substr(0, header_end));
+  std::string line;
+  while (std::getline(hs, line)) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    auto pos = line.find(':');
+    if (pos == std::string::npos) continue;
+    auto key = lower(core::trim(line.substr(0, pos)));
+    auto value = core::trim(line.substr(pos + 1));
+    if (key == "content-length") {
+      try {
+        content_length = static_cast<std::size_t>(std::stoull(value));
+      } catch (...) {
+        return false;
+      }
+    }
+  }
+
+  auto total_needed = header_end + 4 + content_length;
+  while (pending.size() < total_needed) {
+    int n = SSL_read(ssl, buf, sizeof(buf));
+    if (n <= 0) return false;
+    pending.append(buf, static_cast<std::size_t>(n));
+  }
+
+  raw_message = pending.substr(0, total_needed);
+  return true;
 }
 
 std::string get_body(const std::string& req) {
@@ -265,8 +317,17 @@ void AuthPortalServer::run() {
     close(fd);
     return;
   }
+
+  std::unique_ptr<SSL_CTX, void (*)(SSL_CTX*)> server_ctx(
+      runtime_.tls_mitm.create_server_ctx_for_host(runtime_.config.proxy_auth_portal_listen_host), SSL_CTX_free);
+  if (!server_ctx) {
+    core::app_logger().log(core::LogLevel::Error, "auth portal: failed to create TLS server context");
+    close(fd);
+    return;
+  }
+
   core::app_logger().log(core::LogLevel::Info,
-                         "auth portal listening on " + runtime_.config.proxy_auth_portal_listen_host + ":" +
+                         "auth portal listening on https://" + runtime_.config.proxy_auth_portal_listen_host + ":" +
                              std::to_string(runtime_.config.proxy_auth_portal_listen_port));
 
   while (true) {
@@ -278,17 +339,29 @@ void AuthPortalServer::run() {
     inet_ntop(AF_INET, &caddr.sin_addr, ip, sizeof(ip));
     std::string client_addr = std::string(ip) + ":" + std::to_string(ntohs(caddr.sin_port));
 
-    std::thread([this, cfd, client_addr]() {
-      char buf[65536] = {0};
-      auto n = recv(cfd, buf, sizeof(buf) - 1, 0);
-      if (n <= 0) {
+    std::thread([this, cfd, client_addr, server_ctx_raw = server_ctx.get()]() {
+      std::unique_ptr<SSL, void (*)(SSL*)> ssl(SSL_new(server_ctx_raw), SSL_free);
+      if (!ssl) {
+        close(cfd);
+        return;
+      }
+      SSL_set_fd(ssl.get(), cfd);
+      if (SSL_accept(ssl.get()) != 1) {
+        SSL_shutdown(ssl.get());
         close(cfd);
         return;
       }
 
-      std::string req(buf, static_cast<std::size_t>(n));
+      std::string req;
+      if (!read_http_message_over_ssl(ssl.get(), req)) {
+        SSL_shutdown(ssl.get());
+        close(cfd);
+        return;
+      }
+
       auto line_end = req.find("\r\n");
       if (line_end == std::string::npos) {
+        SSL_shutdown(ssl.get());
         close(cfd);
         return;
       }
@@ -331,7 +404,7 @@ void AuthPortalServer::run() {
         } else {
           auto session_id = runtime_.portal_sessions.create(username, runtime_.config.proxy_auth_portal_session_ttl_sec);
           auto cookie_header = "Set-Cookie: " + runtime_.config.proxy_auth_portal_cookie_name + "=" + session_id +
-                               "; HttpOnly; Path=/; Max-Age=" +
+                               "; HttpOnly; Secure; Path=/; Max-Age=" +
                                std::to_string(runtime_.config.proxy_auth_portal_session_ttl_sec) + "\r\n";
           runtime_.audit.write(make_auth_event(client_addr, "allow", username, "proxy_auth_portal_login", posted_return_to));
           if (!posted_return_to.empty()) {
@@ -349,7 +422,7 @@ void AuthPortalServer::run() {
         runtime_.audit.write(make_auth_event(client_addr, "logout", current_user, "proxy_auth_portal_logout", path));
         resp = make_http_response(200, "OK", "{\"ok\":true}", "application/json; charset=utf-8",
                                   "Set-Cookie: " + runtime_.config.proxy_auth_portal_cookie_name +
-                                      "=; Max-Age=0; HttpOnly; Path=/\r\n");
+                                      "=; Max-Age=0; HttpOnly; Secure; Path=/\r\n");
       } else if (path.rfind("/session", 0) == 0 && method == "GET") {
         std::ostringstream os;
         os << "{\"authenticated\":" << (!current_user.empty() ? "true" : "false")
@@ -359,7 +432,8 @@ void AuthPortalServer::run() {
         resp = make_http_response(404, "Not Found", "<html><body>not found</body></html>");
       }
 
-      send(cfd, resp.data(), resp.size(), 0);
+      ssl_write_all(ssl.get(), resp.data(), resp.size());
+      SSL_shutdown(ssl.get());
       close(cfd);
     }).detach();
   }

@@ -173,7 +173,7 @@ std::map<std::string, std::string> parse_cookie_header(const std::string& cookie
 }
 
 std::string portal_login_url(const proxy::Runtime& runtime, const std::string& return_to) {
-  return "http://" + runtime.config.proxy_auth_portal_listen_host + ":" +
+  return "https://" + runtime.config.proxy_auth_portal_listen_host + ":" +
          std::to_string(runtime.config.proxy_auth_portal_listen_port) + "/login?return_to=" + url_encode(return_to);
 }
 

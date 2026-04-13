@@ -1,5 +1,6 @@
 #include "openscanproxy/tlsmitm/tls_mitm.hpp"
 
+#include <arpa/inet.h>
 #include <openssl/bn.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
@@ -7,6 +8,7 @@
 #include <openssl/x509v3.h>
 
 #include <ctime>
+#include <cstring>
 #include <memory>
 
 namespace openscanproxy::tlsmitm {
@@ -45,6 +47,11 @@ bool add_ext(X509* cert, int nid, const std::string& value, X509* issuer) {
   auto rc = X509_add_ext(cert, ext, -1);
   X509_EXTENSION_free(ext);
   return rc == 1;
+}
+
+bool is_ip_literal(const std::string& host) {
+  unsigned char buf[sizeof(struct in6_addr)] = {0};
+  return inet_pton(AF_INET, host.c_str(), buf) == 1 || inet_pton(AF_INET6, host.c_str(), buf) == 1;
 }
 }  // namespace
 
@@ -129,7 +136,7 @@ SSL_CTX* TLSMitmEngine::create_server_ctx_for_host(const std::string& host) cons
   if (!add_ext(leaf.get(), NID_subject_key_identifier, "hash", ca_cert_)) return nullptr;
   if (!add_ext(leaf.get(), NID_authority_key_identifier, "keyid,issuer", ca_cert_)) return nullptr;
 
-  std::string san = "DNS:" + host;
+  std::string san = (is_ip_literal(host) ? "IP:" : "DNS:") + host;
   if (!add_ext(leaf.get(), NID_subject_alt_name, san, ca_cert_)) return nullptr;
   if (X509_sign(leaf.get(), ca_pkey_, EVP_sha256()) <= 0) return nullptr;
 
