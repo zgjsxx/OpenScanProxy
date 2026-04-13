@@ -14,6 +14,7 @@
 #include <chrono>
 #include <algorithm>
 #include <cctype>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -61,6 +62,11 @@ std::pair<std::string, uint16_t> split_host_port(const std::string& hp, uint16_t
   return {hp.substr(0, pos), static_cast<uint16_t>(std::stoi(hp.substr(pos + 1)))};
 }
 
+std::string lower(std::string s) {
+  std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return s;
+}
+
 audit::AuditEvent make_access_event(const std::string& timestamp, const std::string& client_addr, const std::string& host,
                                     const std::string& url, const std::string& method, int status_code,
                                     std::uint64_t latency_ms, std::size_t bytes_in, std::size_t bytes_out,
@@ -84,6 +90,24 @@ audit::AuditEvent make_access_event(const std::string& timestamp, const std::str
   return event;
 }
 
+audit::AuditEvent make_proxy_auth_event(const std::string& client_addr, const std::string& host, const std::string& url,
+                                        const std::string& user, const std::string& action,
+                                        const std::string& decision_source, const std::string& rule_hit = "") {
+  audit::AuditEvent event;
+  event.event_type = "auth";
+  event.timestamp = core::now_iso8601();
+  event.client_addr = client_addr;
+  event.user = user.empty() ? "-" : user;
+  event.host = host;
+  event.url = url;
+  event.action = action;
+  event.decision_source = decision_source;
+  event.rule_hit = rule_hit;
+  return event;
+}
+
+std::string html_escape(const std::string& in);
+
 std::string make_proxy_auth_required_response() {
   static const std::string body = "<html><body><h1>407 Proxy Authentication Required</h1></body></html>";
   std::ostringstream os;
@@ -93,6 +117,175 @@ std::string make_proxy_auth_required_response() {
      << "Content-Length: " << body.size() << "\r\n\r\n"
      << body;
   return os.str();
+}
+
+std::string url_encode(const std::string& value) {
+  static constexpr char kHex[] = "0123456789ABCDEF";
+  std::string out;
+  for (unsigned char c : value) {
+    if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+      out.push_back(static_cast<char>(c));
+    } else {
+      out.push_back('%');
+      out.push_back(kHex[(c >> 4) & 0xF]);
+      out.push_back(kHex[c & 0xF]);
+    }
+  }
+  return out;
+}
+
+std::string url_decode(const std::string& value) {
+  std::string out;
+  out.reserve(value.size());
+  for (std::size_t i = 0; i < value.size(); ++i) {
+    if (value[i] == '%' && i + 2 < value.size()) {
+      try {
+        auto v = static_cast<char>(std::stoi(value.substr(i + 1, 2), nullptr, 16));
+        out.push_back(v);
+        i += 2;
+        continue;
+      } catch (...) {
+      }
+    }
+    out.push_back(value[i] == '+' ? ' ' : value[i]);
+  }
+  return out;
+}
+
+std::map<std::string, std::string> parse_query_string(const std::string& text) {
+  std::map<std::string, std::string> out;
+  for (const auto& seg : core::split(text, '&')) {
+    auto eq = seg.find('=');
+    if (eq == std::string::npos) continue;
+    out[url_decode(seg.substr(0, eq))] = url_decode(seg.substr(eq + 1));
+  }
+  return out;
+}
+
+std::map<std::string, std::string> parse_cookie_header(const std::string& cookie_header) {
+  std::map<std::string, std::string> out;
+  for (const auto& seg : core::split(cookie_header, ';')) {
+    auto eq = seg.find('=');
+    if (eq == std::string::npos) continue;
+    out[core::trim(seg.substr(0, eq))] = core::trim(seg.substr(eq + 1));
+  }
+  return out;
+}
+
+std::string portal_login_url(const proxy::Runtime& runtime, const std::string& return_to) {
+  return "http://" + runtime.config.proxy_auth_portal_listen_host + ":" +
+         std::to_string(runtime.config.proxy_auth_portal_listen_port) + "/login?return_to=" + url_encode(return_to);
+}
+
+bool browser_like_request(const std::map<std::string, std::string>& headers) {
+  auto ua = http::header_get(headers, "User-Agent");
+  auto accept = lower(http::header_get(headers, "Accept"));
+  return !ua.empty() && (accept.empty() || accept.find("text/html") != std::string::npos || accept.find("*/*") != std::string::npos);
+}
+
+std::string absolute_request_url(const std::string& host, const std::string& uri, bool https) {
+  if (uri.rfind("http://", 0) == 0 || uri.rfind("https://", 0) == 0) return uri;
+  auto path = uri.empty() ? "/" : uri;
+  return std::string(https ? "https://" : "http://") + host + path;
+}
+
+std::string extract_host_from_absolute_url(const std::string& url) {
+  auto scheme = url.find("://");
+  if (scheme == std::string::npos) return "";
+  auto start = scheme + 3;
+  auto end = url.find_first_of("/?#", start);
+  auto authority = url.substr(start, end == std::string::npos ? std::string::npos : end - start);
+  auto at = authority.rfind('@');
+  if (at != std::string::npos) authority = authority.substr(at + 1);
+  auto colon = authority.find(':');
+  return lower(colon == std::string::npos ? authority : authority.substr(0, colon));
+}
+
+std::string append_auth_token_to_url(const std::string& url, const std::string& token) {
+  auto hash = url.find('#');
+  auto base = hash == std::string::npos ? url : url.substr(0, hash);
+  auto fragment = hash == std::string::npos ? "" : url.substr(hash);
+  auto sep = base.find('?') == std::string::npos ? '?' : '&';
+  return base + sep + "__osp_auth=" + url_encode(token) + fragment;
+}
+
+std::string strip_auth_token_from_url(const std::string& url) {
+  auto hash = url.find('#');
+  auto base = hash == std::string::npos ? url : url.substr(0, hash);
+  auto fragment = hash == std::string::npos ? "" : url.substr(hash);
+  auto query_pos = base.find('?');
+  if (query_pos == std::string::npos) return url;
+  auto prefix = base.substr(0, query_pos);
+  auto query = base.substr(query_pos + 1);
+  auto parts = core::split(query, '&');
+  std::vector<std::string> kept;
+  for (const auto& part : parts) {
+    auto eq = part.find('=');
+    auto key = url_decode(eq == std::string::npos ? part : part.substr(0, eq));
+    if (key == "__osp_auth") continue;
+    if (!part.empty()) kept.push_back(part);
+  }
+  std::ostringstream os;
+  os << prefix;
+  if (!kept.empty()) {
+    os << '?';
+    for (std::size_t i = 0; i < kept.size(); ++i) {
+      if (i) os << '&';
+      os << kept[i];
+    }
+  }
+  os << fragment;
+  return os.str();
+}
+
+std::string to_origin_form_uri(const std::string& uri) {
+  if (uri.rfind("http://", 0) != 0 && uri.rfind("https://", 0) != 0) return uri;
+  auto scheme = uri.find("://");
+  auto path_begin = uri.find('/', scheme == std::string::npos ? 0 : scheme + 3);
+  if (path_begin == std::string::npos) return "/";
+  return uri.substr(path_begin);
+}
+
+std::string extract_auth_token_from_url(const std::string& url) {
+  auto query_pos = url.find('?');
+  if (query_pos == std::string::npos) return "";
+  auto fragment_pos = url.find('#', query_pos + 1);
+  auto query = url.substr(query_pos + 1, fragment_pos == std::string::npos ? std::string::npos : fragment_pos - query_pos - 1);
+  auto params = parse_query_string(query);
+  auto it = params.find("__osp_auth");
+  return it == params.end() ? "" : it->second;
+}
+
+std::string make_redirect_response(const std::string& location, const std::string& extra_headers = "") {
+  auto body = "<html><body><a href=\"" + html_escape(location) + "\">Redirecting</a></body></html>";
+  std::ostringstream os;
+  os << "HTTP/1.1 302 Found\r\n"
+     << "Content-Type: text/html; charset=utf-8\r\n"
+     << "Cache-Control: no-store\r\n"
+     << "Location: " << location << "\r\n"
+     << extra_headers
+     << "Content-Length: " << body.size() << "\r\n\r\n"
+     << body;
+  return os.str();
+}
+
+std::string make_portal_redirect_response(const proxy::Runtime& runtime, const std::string& return_to) {
+  return make_redirect_response(portal_login_url(runtime, return_to));
+}
+
+std::string make_domain_cookie_response(const proxy::Runtime& runtime, const std::string& absolute_url,
+                                        const std::string& host, const std::string& username, bool secure_cookie) {
+  auto cookie_value = runtime.build_proxy_auth_cookie_value(username, host);
+  auto location = strip_auth_token_from_url(absolute_url);
+  auto max_age = std::to_string(runtime.config.proxy_auth_portal_session_ttl_sec);
+  auto cookie = "Set-Cookie: " + runtime.config.proxy_auth_cookie_name + "=" + cookie_value +
+                "; HttpOnly; Path=/; Max-Age=" + max_age + (secure_cookie ? "; Secure" : "") + "\r\n";
+  return make_redirect_response(location, cookie);
+}
+
+bool target_is_portal_endpoint(const proxy::Runtime& runtime, const std::string& host, std::uint16_t port) {
+  return lower(host) == lower(runtime.config.proxy_auth_portal_listen_host) &&
+         port == runtime.config.proxy_auth_portal_listen_port;
 }
 
 std::string html_escape(const std::string& in) {
@@ -455,7 +648,7 @@ void ProxyServer::handle_client(int cfd, const std::string& client_addr) {
     pending.erase(0, consumed);
 
     auto user = authenticate_proxy_request(runtime_.proxy_auth, headers);
-    if (runtime_.proxy_auth.enabled() && user.empty()) {
+    if (runtime_.proxy_auth.enabled() && runtime_.config.proxy_auth_mode == "basic" && user.empty()) {
       auto start = std::chrono::steady_clock::now();
       auto response = make_proxy_auth_required_response();
       send(cfd, response.data(), response.size(), 0);
@@ -483,6 +676,17 @@ void ProxyServer::handle_client(int cfd, const std::string& client_addr) {
 void ProxyServer::handle_connect_tunnel(int cfd, const std::string& target, const std::string& client_addr, const std::string& user) {
   auto start = std::chrono::steady_clock::now();
   auto [host, port] = split_host_port(target, 443);
+  if (runtime_.config.enable_proxy_auth && user.empty() && !runtime_.config.enable_https_mitm) {
+    auto response = make_proxy_auth_required_response();
+    send(cfd, response.data(), response.size(), 0);
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    auto denied = make_access_event(core::now_iso8601(), client_addr, host, target, "CONNECT", 407, ms, 0, response.size(), false, "");
+    denied.action = "block";
+    denied.decision_source = "proxy_basic_fallback";
+    denied.rule_hit = "missing_proxy_auth_for_connect";
+    runtime_.audit.write(denied);
+    return;
+  }
   auto access = runtime_.policy.evaluate_access(host, target, "CONNECT", user);
   if (access.action == policy::AccessAction::Block && !runtime_.config.enable_https_mitm) {
     auto r = make_block_notification_response(access.reason, access.matched_rule, access.matched_type);
@@ -560,12 +764,74 @@ void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host,
 
     http::HttpRequest req;
     if (!http::parse_request(raw_req, req)) break;
-    auto access = runtime_.policy.evaluate_access(host, req.uri, req.method, user);
+    auto resolved_user = user;
+    const auto absolute_url = absolute_request_url(host, req.uri, true);
+    if (runtime_.config.enable_proxy_auth) {
+      auto cookies = parse_cookie_header(http::header_get(req.headers, "Cookie"));
+      if (resolved_user.empty()) {
+        auto cookie_it = cookies.find(runtime_.config.proxy_auth_cookie_name);
+        if (cookie_it != cookies.end()) {
+          resolved_user = runtime_.validate_proxy_auth_cookie(cookie_it->second, host);
+          if (!resolved_user.empty()) {
+            runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, resolved_user, "allow", "proxy_portal_cookie"));
+          }
+        }
+      }
+      if (resolved_user.empty() && runtime_.portal_auth_enabled()) {
+        auto auth_token = extract_auth_token_from_url(req.uri);
+        if (!auth_token.empty()) {
+          auto token_user = runtime_.domain_tokens.consume(auth_token, host);
+          if (!token_user.empty()) {
+            auto response = make_domain_cookie_response(runtime_, absolute_url, host, token_user, true);
+            ssl_write_all(client_ssl, response.data(), response.size());
+            runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, token_user, "allow", "proxy_portal_token"));
+            SSL_shutdown(client_ssl);
+            SSL_shutdown(upstream_ssl);
+            SSL_free(client_ssl);
+            SSL_free(upstream_ssl);
+            close(sfd);
+            return;
+          }
+          auto response = make_block_notification_response("Invalid or expired authentication token");
+          ssl_write_all(client_ssl, response.data(), response.size());
+          runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, "", "block", "proxy_portal_token",
+                                                    "invalid_or_expired_token"));
+          SSL_shutdown(client_ssl);
+          SSL_shutdown(upstream_ssl);
+          SSL_free(client_ssl);
+          SSL_free(upstream_ssl);
+          close(sfd);
+          return;
+        }
+        auto response = make_portal_redirect_response(runtime_, absolute_url);
+        ssl_write_all(client_ssl, response.data(), response.size());
+        runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, "", "redirect", "proxy_auth_portal"));
+        SSL_shutdown(client_ssl);
+        SSL_shutdown(upstream_ssl);
+        SSL_free(client_ssl);
+        SSL_free(upstream_ssl);
+        close(sfd);
+        return;
+      }
+      if (resolved_user.empty() && runtime_.proxy_basic_enabled()) {
+        auto response = make_proxy_auth_required_response();
+        ssl_write_all(client_ssl, response.data(), response.size());
+        runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, "", "block", "proxy_basic_fallback",
+                                                  "missing_or_invalid_proxy_auth"));
+        SSL_shutdown(client_ssl);
+        SSL_shutdown(upstream_ssl);
+        SSL_free(client_ssl);
+        SSL_free(upstream_ssl);
+        close(sfd);
+        return;
+      }
+    }
+    auto access = runtime_.policy.evaluate_access(host, req.uri, req.method, resolved_user);
     if (access.action == policy::AccessAction::Block) {
       auto r = make_block_notification_response(access.reason, access.matched_rule, access.matched_type);
       ssl_write_all(client_ssl, r.data(), r.size());
       runtime_.stats.inc_blocked();
-      auto event = make_access_event(core::now_iso8601(), client_addr, host, req.uri, req.method, 403, 0, raw_req.size(), r.size(), true, user);
+      auto event = make_access_event(core::now_iso8601(), client_addr, host, req.uri, req.method, 403, 0, raw_req.size(), r.size(), true, resolved_user);
       event.action = "block";
       event.rule_hit = access.matched_rule;
       event.decision_source = access.matched_type;
@@ -593,7 +859,7 @@ void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host,
       scan_event.event_type = "scan";
       scan_event.timestamp = core::now_iso8601();
       scan_event.client_addr = client_addr;
-      scan_event.user = user.empty() ? "-" : user;
+      scan_event.user = resolved_user.empty() ? "-" : resolved_user;
       scan_event.host = host;
       scan_event.url = req.uri;
       scan_event.url_category = policy::classify_url(host, req.uri);
@@ -644,7 +910,7 @@ void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host,
         scan_event.event_type = "scan";
         scan_event.timestamp = core::now_iso8601();
         scan_event.client_addr = client_addr;
-        scan_event.user = user.empty() ? "-" : user;
+        scan_event.user = resolved_user.empty() ? "-" : resolved_user;
         scan_event.host = host;
         scan_event.url = req.uri;
         scan_event.url_category = policy::classify_url(host, req.uri);
@@ -704,75 +970,124 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
     return false;
   }
   auto [host, port] = split_host_port(host_h, 80);
-  auto access = runtime_.policy.evaluate_access(host, req.uri, req.method, user);
-  if (access.action == policy::AccessAction::Block) {
-    auto r = make_block_notification_response(access.reason, access.matched_rule, access.matched_type);
-    send(cfd, r.data(), r.size(), 0);
-    runtime_.stats.inc_blocked();
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
-    auto event =
-        make_access_event(core::now_iso8601(), client_addr, host, req.uri, req.method, 403, ms, bytes_in, r.size(), false, user);
-    event.action = "block";
-    event.rule_hit = access.matched_rule;
-    event.decision_source = access.matched_type;
-    runtime_.audit.write(event);
-    return false;
+  auto resolved_user = user;
+  const auto secure_cookie = false;
+  const auto absolute_url = absolute_request_url(host_h, req.uri, false);
+  const auto portal_target = target_is_portal_endpoint(runtime_, host, port);
+  if (runtime_.config.enable_proxy_auth && !portal_target) {
+    auto cookies = parse_cookie_header(http::header_get(req.headers, "Cookie"));
+    if (resolved_user.empty()) {
+      auto cookie_it = cookies.find(runtime_.config.proxy_auth_cookie_name);
+      if (cookie_it != cookies.end()) {
+        resolved_user = runtime_.validate_proxy_auth_cookie(cookie_it->second, host);
+        if (!resolved_user.empty()) {
+          runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, resolved_user, "allow", "proxy_portal_cookie"));
+        }
+      }
+    }
+    if (resolved_user.empty() && runtime_.portal_auth_enabled()) {
+      auto auth_token = extract_auth_token_from_url(req.uri);
+      if (!auth_token.empty()) {
+        auto token_user = runtime_.domain_tokens.consume(auth_token, host);
+        if (!token_user.empty()) {
+          auto response = make_domain_cookie_response(runtime_, absolute_url, host, token_user, secure_cookie);
+          send(cfd, response.data(), response.size(), 0);
+          runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, token_user, "allow", "proxy_portal_token"));
+          return false;
+        }
+        auto response = make_block_notification_response("Invalid or expired authentication token");
+        send(cfd, response.data(), response.size(), 0);
+        runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, "", "block", "proxy_portal_token", "invalid_or_expired_token"));
+        return false;
+      }
+      if (runtime_.config.proxy_auth_mode == "portal" || browser_like_request(req.headers)) {
+        auto response = make_portal_redirect_response(runtime_, absolute_url);
+        send(cfd, response.data(), response.size(), 0);
+        runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, "", "redirect", "proxy_auth_portal"));
+        return false;
+      }
+    }
+    if (resolved_user.empty() && runtime_.proxy_basic_enabled()) {
+      auto response = make_proxy_auth_required_response();
+      send(cfd, response.data(), response.size(), 0);
+      runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, "", "block", "proxy_basic_fallback",
+                                                 "missing_or_invalid_proxy_auth"));
+      return false;
+    }
   }
 
-  for (auto& f : runtime_.extractor.from_request(req, host)) {
-    if (f.bytes.size() > runtime_.config.max_scan_file_size) continue;
-    auto sha = core::sha256_hex(f.bytes);
-    runtime_.stats.inc_scanned_files();
-    auto result = runtime_.scanner->scan(f, runtime_.scan_ctx);
-    if (result.status == core::ScanStatus::Clean) runtime_.stats.inc_clean();
-    else if (result.status == core::ScanStatus::Infected) runtime_.stats.inc_infected();
-    else if (result.status == core::ScanStatus::Suspicious) runtime_.stats.inc_suspicious();
-    else runtime_.stats.inc_scanner_error();
-
-    auto action = runtime_.policy.decide(result);
-    if (action == core::Action::Block) runtime_.stats.inc_blocked();
-
-    audit::AuditEvent scan_event;
-    scan_event.event_type = "scan";
-    scan_event.timestamp = core::now_iso8601();
-    scan_event.client_addr = client_addr;
-    scan_event.user = user.empty() ? "-" : user;
-    scan_event.host = host;
-    scan_event.url = req.uri;
-    scan_event.url_category = policy::classify_url(host, req.uri);
-    scan_event.method = req.method;
-    scan_event.status_code = 0;
-    scan_event.bytes_in = bytes_in;
-    scan_event.filename = f.filename;
-    scan_event.file_size = f.bytes.size();
-    scan_event.mime = f.mime;
-    scan_event.sha256 = sha;
-    scan_event.scanner = result.scanner_name;
-    scan_event.result = policy::to_string(result.status);
-    scan_event.signature = result.signature;
-    scan_event.action = policy::to_string(action);
-    scan_event.rule_hit = result.signature;
-    scan_event.decision_source = "policy";
-    runtime_.audit.write(scan_event);
-
-    if (action == core::Action::Block) {
-      auto r = make_block_notification_response("Threat detected: " + result.signature);
+  if (!portal_target) {
+    auto access = runtime_.policy.evaluate_access(host, req.uri, req.method, resolved_user);
+    if (access.action == policy::AccessAction::Block) {
+      auto r = make_block_notification_response(access.reason, access.matched_rule, access.matched_type);
       send(cfd, r.data(), r.size(), 0);
+      runtime_.stats.inc_blocked();
       auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
-      runtime_.audit.write(make_access_event(core::now_iso8601(), client_addr, host, req.uri, req.method, 403, ms, bytes_in,
-                                             r.size(), false, user));
+      auto event =
+          make_access_event(core::now_iso8601(), client_addr, host, req.uri, req.method, 403, ms, bytes_in, r.size(), false, resolved_user);
+      event.action = "block";
+      event.rule_hit = access.matched_rule;
+      event.decision_source = access.matched_type;
+      runtime_.audit.write(event);
       return false;
+    }
+
+    for (auto& f : runtime_.extractor.from_request(req, host)) {
+      if (f.bytes.size() > runtime_.config.max_scan_file_size) continue;
+      auto sha = core::sha256_hex(f.bytes);
+      runtime_.stats.inc_scanned_files();
+      auto result = runtime_.scanner->scan(f, runtime_.scan_ctx);
+      if (result.status == core::ScanStatus::Clean) runtime_.stats.inc_clean();
+      else if (result.status == core::ScanStatus::Infected) runtime_.stats.inc_infected();
+      else if (result.status == core::ScanStatus::Suspicious) runtime_.stats.inc_suspicious();
+      else runtime_.stats.inc_scanner_error();
+
+      auto action = runtime_.policy.decide(result);
+      if (action == core::Action::Block) runtime_.stats.inc_blocked();
+
+      audit::AuditEvent scan_event;
+      scan_event.event_type = "scan";
+      scan_event.timestamp = core::now_iso8601();
+      scan_event.client_addr = client_addr;
+      scan_event.user = resolved_user.empty() ? "-" : resolved_user;
+      scan_event.host = host;
+      scan_event.url = req.uri;
+      scan_event.url_category = policy::classify_url(host, req.uri);
+      scan_event.method = req.method;
+      scan_event.status_code = 0;
+      scan_event.bytes_in = bytes_in;
+      scan_event.filename = f.filename;
+      scan_event.file_size = f.bytes.size();
+      scan_event.mime = f.mime;
+      scan_event.sha256 = sha;
+      scan_event.scanner = result.scanner_name;
+      scan_event.result = policy::to_string(result.status);
+      scan_event.signature = result.signature;
+      scan_event.action = policy::to_string(action);
+      scan_event.rule_hit = result.signature;
+      scan_event.decision_source = "policy";
+      runtime_.audit.write(scan_event);
+
+      if (action == core::Action::Block) {
+        auto r = make_block_notification_response("Threat detected: " + result.signature);
+        send(cfd, r.data(), r.size(), 0);
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+        runtime_.audit.write(make_access_event(core::now_iso8601(), client_addr, host, req.uri, req.method, 403, ms, bytes_in,
+                                               r.size(), false, resolved_user));
+        return false;
+      }
     }
   }
 
   int sfd = connect_host_port(host, port);
   if (sfd < 0) {
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
-    runtime_.audit.write(make_access_event(core::now_iso8601(), client_addr, host, req.uri, req.method, 502, ms, bytes_in, 0, false, user));
+    runtime_.audit.write(make_access_event(core::now_iso8601(), client_addr, host, req.uri, req.method, 502, ms, bytes_in, 0, false, resolved_user));
     return false;
   }
   req.headers.erase("Proxy-Authorization");
   req.headers.erase("proxy-authorization");
+  req.uri = to_origin_form_uri(strip_auth_token_from_url(req.uri));
   auto forward_raw = http::serialize_request(req);
   if (!send_all(sfd, forward_raw.data(), forward_raw.size())) {
     close(sfd);
@@ -829,7 +1144,7 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
 
   http::HttpResponse resp;
   std::string upstream = parseable ? upstream_for_parse : std::string{};
-  if (http::parse_response(upstream, resp)) {
+  if (!portal_target && http::parse_response(upstream, resp)) {
     final_status = resp.status;
     for (auto& f : runtime_.extractor.from_response(req, resp, host)) {
       if (f.bytes.size() > runtime_.config.max_scan_file_size) continue;
@@ -847,7 +1162,7 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
       scan_event.event_type = "scan";
       scan_event.timestamp = core::now_iso8601();
       scan_event.client_addr = client_addr;
-      scan_event.user = user.empty() ? "-" : user;
+      scan_event.user = resolved_user.empty() ? "-" : resolved_user;
       scan_event.host = host;
       scan_event.url = req.uri;
       scan_event.url_category = policy::classify_url(host, req.uri);
@@ -870,7 +1185,7 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
   }
   auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
   runtime_.audit.write(
-      make_access_event(core::now_iso8601(), client_addr, host, req.uri, req.method, final_status, ms, bytes_in, bytes_out, false, user));
+      make_access_event(core::now_iso8601(), client_addr, host, req.uri, req.method, final_status, ms, bytes_in, bytes_out, false, resolved_user));
   return !http::message_should_close(req.version, req.headers) &&
          !(resp.version.empty() ? true : http::message_should_close(resp.version, resp.headers));
 }

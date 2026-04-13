@@ -22,6 +22,7 @@ add_executable(openscanproxy
   src/tlsmitm/tls_mitm.cpp
   src/proxy/proxy_server.cpp
   src/admin/admin_server.cpp
+  src/auth/auth_portal_server.cpp
 )
 
 target_include_directories(openscanproxy PRIVATE include)

@@ -97,9 +97,17 @@ AppConfig ConfigLoader::load_from_file(const std::string& path) {
   GET_S("admin_user", admin_user);
   GET_S("admin_password", admin_password);
   GET_B("enable_proxy_auth", enable_proxy_auth);
+  GET_S("proxy_auth_mode", proxy_auth_mode);
   GET_S("proxy_auth_user", proxy_auth_user);
   GET_S("proxy_auth_password", proxy_auth_password);
   GET_S("proxy_users_file", proxy_users_file);
+  GET_S("proxy_auth_portal_listen_host", proxy_auth_portal_listen_host);
+  GET_U16("proxy_auth_portal_listen_port", proxy_auth_portal_listen_port);
+  GET_S("proxy_auth_cookie_name", proxy_auth_cookie_name);
+  GET_S("proxy_auth_portal_cookie_name", proxy_auth_portal_cookie_name);
+  GET_U64("proxy_auth_token_ttl_sec", proxy_auth_token_ttl_sec);
+  GET_U64("proxy_auth_portal_session_ttl_sec", proxy_auth_portal_session_ttl_sec);
+  GET_S("proxy_auth_signing_key", proxy_auth_signing_key);
   GET_S("domain_category_data_file", domain_category_data_file);
 
   cfg.allowed_mime = parse_string_array(text, "allowed_mime");
@@ -113,8 +121,18 @@ AppConfig ConfigLoader::load_from_file(const std::string& path) {
   cfg.url_category_whitelist = parse_string_array(text, "url_category_whitelist");
   cfg.url_category_blacklist = parse_string_array(text, "url_category_blacklist");
   cfg.access_rules = parse_access_rules(text);
+  if (cfg.proxy_auth_mode != "basic" && cfg.proxy_auth_mode != "portal" && cfg.proxy_auth_mode != "hybrid") {
+    cfg.proxy_auth_mode = "basic";
+  }
   if (cfg.default_access_action != "allow" && cfg.default_access_action != "block") {
     cfg.default_access_action = "allow";
+  }
+  if (cfg.proxy_auth_portal_session_ttl_sec == 0) cfg.proxy_auth_portal_session_ttl_sec = 3600;
+  if (cfg.proxy_auth_token_ttl_sec == 0) cfg.proxy_auth_token_ttl_sec = 120;
+  if (cfg.proxy_auth_cookie_name.empty()) cfg.proxy_auth_cookie_name = "osp_proxy_auth";
+  if (cfg.proxy_auth_portal_cookie_name.empty()) cfg.proxy_auth_portal_cookie_name = "osp_portal_session";
+  if (cfg.proxy_auth_signing_key.empty()) {
+    cfg.proxy_auth_signing_key = cfg.admin_password + ":" + cfg.proxy_auth_password + ":openscanproxy";
   }
   return cfg;
 }

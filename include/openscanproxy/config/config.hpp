@@ -54,9 +54,17 @@ struct AppConfig {
   std::string admin_user{"admin"};
   std::string admin_password{"admin123"};
   bool enable_proxy_auth{false};
+  std::string proxy_auth_mode{"basic"};
   std::string proxy_auth_user{"proxy"};
   std::string proxy_auth_password{"proxy123"};
   std::string proxy_users_file{"./configs/proxy_users.json"};
+  std::string proxy_auth_portal_listen_host{"127.0.0.1"};
+  uint16_t proxy_auth_portal_listen_port{9091};
+  std::string proxy_auth_cookie_name{"osp_proxy_auth"};
+  std::string proxy_auth_portal_cookie_name{"osp_portal_session"};
+  std::uint64_t proxy_auth_token_ttl_sec{120};
+  std::uint64_t proxy_auth_portal_session_ttl_sec{3600};
+  std::string proxy_auth_signing_key{"change-me"};
   std::string domain_category_data_file{"./configs/domain_categories.csv"};
 };
 

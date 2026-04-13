@@ -1,3 +1,4 @@
+#include "openscanproxy/auth/auth_portal_server.hpp"
 #include "openscanproxy/admin/admin_server.hpp"
 #include "openscanproxy/config/config.hpp"
 #include "openscanproxy/core/logger.hpp"
@@ -5,6 +6,7 @@
 #include "openscanproxy/scanner/scanner.hpp"
 
 #include <csignal>
+#include <memory>
 #include <thread>
 
 using namespace openscanproxy;
@@ -42,12 +44,19 @@ int main(int argc, char** argv) {
 
     proxy::ProxyServer proxy_server(runtime);
     admin::AdminServer admin_server(runtime);
-
     std::thread t1([&]() { admin_server.run(); });
     std::thread t2([&]() { proxy_server.run(); });
+    std::unique_ptr<std::thread> t3;
+    if (runtime.portal_auth_enabled()) {
+      t3 = std::make_unique<std::thread>([&]() {
+        auth::AuthPortalServer auth_portal_server(runtime);
+        auth_portal_server.run();
+      });
+    }
 
     t1.join();
     t2.join();
+    if (t3 && t3->joinable()) t3->join();
   } catch (const std::exception& ex) {
     core::app_logger().log(core::LogLevel::Error, std::string("fatal: ") + ex.what());
     return 1;

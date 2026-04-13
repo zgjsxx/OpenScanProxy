@@ -2,6 +2,7 @@
 
 #include "openscanproxy/audit/audit.hpp"
 #include "openscanproxy/config/config.hpp"
+#include "openscanproxy/core/util.hpp"
 #include "openscanproxy/extractor/extractor.hpp"
 #include "openscanproxy/policy/policy.hpp"
 #include "openscanproxy/scanner/scanner.hpp"
@@ -9,10 +10,14 @@
 #include "openscanproxy/tlsmitm/tls_mitm.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <mutex>
 #include <memory>
+#include <optional>
+#include <random>
 #include <regex>
 #include <sstream>
 #include <string>
@@ -109,9 +114,115 @@ class ProxyAuthStore {
   std::unordered_map<std::string, std::string> users_;
 };
 
+struct PortalSession {
+  std::string username;
+  std::chrono::system_clock::time_point expires_at;
+  std::chrono::system_clock::time_point last_seen_at;
+};
+
+class PortalSessionStore {
+ public:
+  std::string create(const std::string& username, std::uint64_t ttl_sec) {
+    if (username.empty()) return "";
+    std::lock_guard<std::mutex> lk(mu_);
+    auto id = random_token_locked(32);
+    auto now = std::chrono::system_clock::now();
+    sessions_[id] = PortalSession{username, now + std::chrono::seconds(ttl_sec), now};
+    return id;
+  }
+
+  std::string lookup_user(const std::string& session_id) {
+    if (session_id.empty()) return "";
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = sessions_.find(session_id);
+    if (it == sessions_.end()) return "";
+    auto now = std::chrono::system_clock::now();
+    if (it->second.expires_at <= now) {
+      sessions_.erase(it);
+      return "";
+    }
+    it->second.last_seen_at = now;
+    return it->second.username;
+  }
+
+  void destroy(const std::string& session_id) {
+    std::lock_guard<std::mutex> lk(mu_);
+    sessions_.erase(session_id);
+  }
+
+ private:
+  std::string random_token_locked(std::size_t bytes) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(bytes * 2);
+    for (std::size_t i = 0; i < bytes; ++i) {
+      auto value = static_cast<unsigned int>(rng_() & 0xFF);
+      out.push_back(kHex[(value >> 4) & 0xF]);
+      out.push_back(kHex[value & 0xF]);
+    }
+    return out;
+  }
+
+  std::mutex mu_;
+  std::unordered_map<std::string, PortalSession> sessions_;
+  std::mt19937_64 rng_{std::random_device{}()};
+};
+
+struct DomainAuthToken {
+  std::string username;
+  std::string host;
+  std::chrono::system_clock::time_point expires_at;
+};
+
+class ProxyDomainTokenStore {
+ public:
+  std::string issue(const std::string& username, const std::string& host, std::uint64_t ttl_sec) {
+    if (username.empty() || host.empty()) return "";
+    std::lock_guard<std::mutex> lk(mu_);
+    auto token = random_token_locked(24);
+    tokens_[token] = DomainAuthToken{username, core::to_lower(host), std::chrono::system_clock::now() + std::chrono::seconds(ttl_sec)};
+    return token;
+  }
+
+  std::string consume(const std::string& token, const std::string& host) {
+    if (token.empty() || host.empty()) return "";
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = tokens_.find(token);
+    if (it == tokens_.end()) return "";
+    auto now = std::chrono::system_clock::now();
+    auto expected_host = core::to_lower(host);
+    if (it->second.expires_at <= now || it->second.host != expected_host) {
+      tokens_.erase(it);
+      return "";
+    }
+    auto username = it->second.username;
+    tokens_.erase(it);
+    return username;
+  }
+
+ private:
+  std::string random_token_locked(std::size_t bytes) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(bytes * 2);
+    for (std::size_t i = 0; i < bytes; ++i) {
+      auto value = static_cast<unsigned int>(rng_() & 0xFF);
+      out.push_back(kHex[(value >> 4) & 0xF]);
+      out.push_back(kHex[value & 0xF]);
+    }
+    return out;
+  }
+
+  std::mutex mu_;
+  std::unordered_map<std::string, DomainAuthToken> tokens_;
+  std::mt19937_64 rng_{std::random_device{}()};
+};
+
 struct Runtime {
   config::AppConfig config;
   ProxyAuthStore proxy_auth;
+  PortalSessionStore portal_sessions;
+  ProxyDomainTokenStore domain_tokens;
   std::unique_ptr<scanner::IScanner> scanner;
   scanner::ScanContext scan_ctx;
   policy::PolicyEngine policy;
@@ -136,6 +247,48 @@ struct Runtime {
                                     config.access_rules,
                                     policy::access_action_from_string(config.default_access_action)}),
         audit(config.audit_log_path, config.audit_recent_limit) {}
+
+  bool portal_auth_enabled() const { return config.enable_proxy_auth && config.proxy_auth_mode != "basic"; }
+  bool proxy_basic_enabled() const { return config.enable_proxy_auth && config.proxy_auth_mode != "portal"; }
+
+  std::string build_proxy_auth_cookie_value(const std::string& username, const std::string& host) const {
+    if (username.empty() || host.empty()) return "";
+    const auto expires_at = std::chrono::system_clock::now() + std::chrono::seconds(config.proxy_auth_portal_session_ttl_sec);
+    const auto exp_seconds = std::chrono::duration_cast<std::chrono::seconds>(expires_at.time_since_epoch()).count();
+    const auto host_l = core::to_lower(host);
+    const auto payload = username + "|" + host_l + "|" + std::to_string(exp_seconds);
+    std::vector<std::uint8_t> bytes(payload.begin(), payload.end());
+    const auto body = core::sha256_hex(bytes);
+    const auto sig_payload = config.proxy_auth_signing_key + "|" + body;
+    std::vector<std::uint8_t> sig_bytes(sig_payload.begin(), sig_payload.end());
+    const auto sig = core::sha256_hex(sig_bytes);
+    return username + "|" + std::to_string(exp_seconds) + "|" + sig;
+  }
+
+  std::string validate_proxy_auth_cookie(const std::string& cookie_value, const std::string& host) const {
+    auto parts = core::split(cookie_value, '|');
+    if (parts.size() != 3) return "";
+    const auto username = core::trim(parts[0]);
+    const auto host_l = core::to_lower(host);
+    if (username.empty() || host_l.empty()) return "";
+    std::uint64_t exp_seconds = 0;
+    try {
+      exp_seconds = static_cast<std::uint64_t>(std::stoull(parts[1]));
+    } catch (...) {
+      return "";
+    }
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
+    if (exp_seconds <= now) return "";
+    const auto payload = username + "|" + host_l + "|" + parts[1];
+    std::vector<std::uint8_t> bytes(payload.begin(), payload.end());
+    const auto body = core::sha256_hex(bytes);
+    const auto sig_payload = config.proxy_auth_signing_key + "|" + body;
+    std::vector<std::uint8_t> sig_bytes(sig_payload.begin(), sig_payload.end());
+    const auto expected_sig = core::sha256_hex(sig_bytes);
+    return expected_sig == parts[2] ? username : "";
+  }
 };
 
 }  // namespace openscanproxy::proxy

@@ -38,8 +38,16 @@
   "admin_user": "admin",
   "admin_password": "admin123",
   "enable_proxy_auth": false,
+  "proxy_auth_mode": "basic",
   "proxy_auth_user": "proxy",
   "proxy_auth_password": "proxy123",
   "proxy_users_file": "./configs/proxy_users.json",
+  "proxy_auth_portal_listen_host": "127.0.0.1",
+  "proxy_auth_portal_listen_port": 9091,
+  "proxy_auth_cookie_name": "osp_proxy_auth",
+  "proxy_auth_portal_cookie_name": "osp_portal_session",
+  "proxy_auth_token_ttl_sec": 120,
+  "proxy_auth_portal_session_ttl_sec": 3600,
+  "proxy_auth_signing_key": "change-me",
   "domain_category_data_file": "./configs/domain_categories.csv"
 }
