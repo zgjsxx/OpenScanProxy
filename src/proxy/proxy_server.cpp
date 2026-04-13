@@ -688,7 +688,10 @@ void ProxyServer::handle_connect_tunnel(int cfd, const std::string& target, cons
     runtime_.audit.write(denied);
     return;
   }
-  auto access = portal_target ? policy::AccessDecision{} : runtime_.policy.evaluate_access(host, target, "CONNECT", user);
+  policy::AccessPolicyResult access;
+  if (!portal_target) {
+    access = runtime_.policy.evaluate_access(host, target, "CONNECT", user);
+  }
   if (!portal_target && access.action == policy::AccessAction::Block && !runtime_.config.enable_https_mitm) {
     auto r = make_block_notification_response(access.reason, access.matched_rule, access.matched_type);
     send(cfd, r.data(), r.size(), 0);
