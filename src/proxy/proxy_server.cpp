@@ -131,6 +131,11 @@ std::string make_portal_auth_required_response() {
   return os.str();
 }
 
+std::string safe_header_value(const std::map<std::string, std::string>& headers, const std::string& key) {
+  auto value = http::header_get(headers, key);
+  return value.empty() ? "-" : value;
+}
+
 std::string url_encode(const std::string& value) {
   static constexpr char kHex[] = "0123456789ABCDEF";
   std::string out;
@@ -834,8 +839,16 @@ void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host,
           return;
         }
         if (allow_client_ip_auth) {
-          resolved_user = runtime_.portal_client_auth.lookup_user(client_ip_from_addr(client_addr));
+          auto client_ip = client_ip_from_addr(client_addr);
+          resolved_user = runtime_.portal_client_auth.lookup_user(client_ip);
           if (!resolved_user.empty()) {
+            core::app_logger().log(core::LogLevel::Info,
+                                   "proxy auth diagnostic: client-ip hit scheme=https host=" + host +
+                                       " client_addr=" + client_addr +
+                                       " client_ip=" + client_ip +
+                                       " user=" + resolved_user +
+                                       " fetch_mode=" + safe_header_value(req.headers, "Sec-Fetch-Mode") +
+                                       " fetch_dest=" + safe_header_value(req.headers, "Sec-Fetch-Dest"));
             runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, resolved_user, "allow", "proxy_portal_client_ip"));
           }
         }
@@ -851,6 +864,14 @@ void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host,
           return;
         }
         if (resolved_user.empty() && !allow_portal_redirect && !runtime_.proxy_basic_enabled()) {
+          auto client_ip = client_ip_from_addr(client_addr);
+          core::app_logger().log(core::LogLevel::Warn,
+                                 "proxy auth diagnostic: client-ip miss scheme=https host=" + host +
+                                     " client_addr=" + client_addr +
+                                     " client_ip=" + client_ip +
+                                     " fetch_mode=" + safe_header_value(req.headers, "Sec-Fetch-Mode") +
+                                     " fetch_dest=" + safe_header_value(req.headers, "Sec-Fetch-Dest") +
+                                     " referer=" + safe_header_value(req.headers, "Referer"));
           auto response = make_portal_auth_required_response();
           ssl_write_all(client_ssl, response.data(), response.size());
           runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, "", "block", "proxy_portal_client_ip_miss",
@@ -1053,8 +1074,16 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
         return false;
       }
       if (allow_client_ip_auth) {
-        resolved_user = runtime_.portal_client_auth.lookup_user(client_ip_from_addr(client_addr));
+        auto client_ip = client_ip_from_addr(client_addr);
+        resolved_user = runtime_.portal_client_auth.lookup_user(client_ip);
         if (!resolved_user.empty()) {
+          core::app_logger().log(core::LogLevel::Info,
+                                 "proxy auth diagnostic: client-ip hit scheme=http host=" + host +
+                                     " client_addr=" + client_addr +
+                                     " client_ip=" + client_ip +
+                                     " user=" + resolved_user +
+                                     " fetch_mode=" + safe_header_value(req.headers, "Sec-Fetch-Mode") +
+                                     " fetch_dest=" + safe_header_value(req.headers, "Sec-Fetch-Dest"));
           runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, resolved_user, "allow", "proxy_portal_client_ip"));
         }
       }
@@ -1065,6 +1094,14 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
         return false;
       }
       if (resolved_user.empty() && !allow_portal_redirect && !runtime_.proxy_basic_enabled()) {
+        auto client_ip = client_ip_from_addr(client_addr);
+        core::app_logger().log(core::LogLevel::Warn,
+                               "proxy auth diagnostic: client-ip miss scheme=http host=" + host +
+                                   " client_addr=" + client_addr +
+                                   " client_ip=" + client_ip +
+                                   " fetch_mode=" + safe_header_value(req.headers, "Sec-Fetch-Mode") +
+                                   " fetch_dest=" + safe_header_value(req.headers, "Sec-Fetch-Dest") +
+                                   " referer=" + safe_header_value(req.headers, "Referer"));
         auto response = make_portal_auth_required_response();
         send(cfd, response.data(), response.size(), 0);
         runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, "", "block", "proxy_portal_client_ip_miss",
