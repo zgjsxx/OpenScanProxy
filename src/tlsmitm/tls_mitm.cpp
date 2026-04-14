@@ -93,9 +93,10 @@ bool pem_encode_cert(X509* cert, std::string& out) {
   std::unique_ptr<BIO, decltype(&BIO_free)> bio(BIO_new(BIO_s_mem()), BIO_free);
   if (!bio) return false;
   if (PEM_write_bio_X509(bio.get(), cert) != 1) return false;
-  auto* data = BIO_get_mem_data(bio.get(), nullptr);
-  if (!data) return false;
-  out.assign(data, static_cast<std::size_t>(BIO_ctrl_pending(bio.get())));
+  char* data = nullptr;
+  auto size = BIO_get_mem_data(bio.get(), &data);
+  if (size <= 0 || data == nullptr) return false;
+  out.assign(data, static_cast<std::size_t>(size));
   return true;
 }
 
@@ -104,9 +105,10 @@ bool pem_encode_key(EVP_PKEY* key, std::string& out) {
   std::unique_ptr<BIO, decltype(&BIO_free)> bio(BIO_new(BIO_s_mem()), BIO_free);
   if (!bio) return false;
   if (PEM_write_bio_PrivateKey(bio.get(), key, nullptr, nullptr, 0, nullptr, nullptr) != 1) return false;
-  auto* data = BIO_get_mem_data(bio.get(), nullptr);
-  if (!data) return false;
-  out.assign(data, static_cast<std::size_t>(BIO_ctrl_pending(bio.get())));
+  char* data = nullptr;
+  auto size = BIO_get_mem_data(bio.get(), &data);
+  if (size <= 0 || data == nullptr) return false;
+  out.assign(data, static_cast<std::size_t>(size));
   return true;
 }
 
