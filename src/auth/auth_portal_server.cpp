@@ -403,6 +403,8 @@ void AuthPortalServer::run() {
           resp = make_http_response(401, "Unauthorized", login_page_html(posted_return_to, "用户名或密码错误"));
         } else {
           auto session_id = runtime_.portal_sessions.create(username, runtime_.config.proxy_auth_portal_session_ttl_sec);
+          runtime_.portal_client_auth.upsert(client_ip_from_addr(client_addr), username,
+                                             runtime_.config.proxy_auth_portal_session_ttl_sec);
           auto cookie_header = "Set-Cookie: " + runtime_.config.proxy_auth_portal_cookie_name + "=" + session_id +
                                "; HttpOnly; Secure; Path=/; Max-Age=" +
                                std::to_string(runtime_.config.proxy_auth_portal_session_ttl_sec) + "\r\n";
@@ -419,6 +421,7 @@ void AuthPortalServer::run() {
         }
       } else if (path == "/logout" && method == "POST") {
         if (portal_cookie_it != cookies.end()) runtime_.portal_sessions.destroy(portal_cookie_it->second);
+        runtime_.portal_client_auth.destroy(client_ip_from_addr(client_addr));
         runtime_.audit.write(make_auth_event(client_addr, "logout", current_user, "proxy_auth_portal_logout", path));
         resp = make_http_response(200, "OK", "{\"ok\":true}", "application/json; charset=utf-8",
                                   "Set-Cookie: " + runtime_.config.proxy_auth_portal_cookie_name +

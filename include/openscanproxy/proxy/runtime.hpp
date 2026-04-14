@@ -174,6 +174,46 @@ struct DomainAuthToken {
   std::chrono::system_clock::time_point expires_at;
 };
 
+struct PortalClientAuth {
+  std::string username;
+  std::chrono::system_clock::time_point expires_at;
+  std::chrono::system_clock::time_point last_seen_at;
+};
+
+class PortalClientAuthStore {
+ public:
+  void upsert(const std::string& client_ip, const std::string& username, std::uint64_t ttl_sec) {
+    if (client_ip.empty() || username.empty()) return;
+    std::lock_guard<std::mutex> lk(mu_);
+    auto now = std::chrono::system_clock::now();
+    clients_[client_ip] = PortalClientAuth{username, now + std::chrono::seconds(ttl_sec), now};
+  }
+
+  std::string lookup_user(const std::string& client_ip) {
+    if (client_ip.empty()) return "";
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = clients_.find(client_ip);
+    if (it == clients_.end()) return "";
+    auto now = std::chrono::system_clock::now();
+    if (it->second.expires_at <= now) {
+      clients_.erase(it);
+      return "";
+    }
+    it->second.last_seen_at = now;
+    return it->second.username;
+  }
+
+  void destroy(const std::string& client_ip) {
+    if (client_ip.empty()) return;
+    std::lock_guard<std::mutex> lk(mu_);
+    clients_.erase(client_ip);
+  }
+
+ private:
+  std::mutex mu_;
+  std::unordered_map<std::string, PortalClientAuth> clients_;
+};
+
 class ProxyDomainTokenStore {
  public:
   std::string issue(const std::string& username, const std::string& host, std::uint64_t ttl_sec) {
@@ -222,6 +262,7 @@ struct Runtime {
   config::AppConfig config;
   ProxyAuthStore proxy_auth;
   PortalSessionStore portal_sessions;
+  PortalClientAuthStore portal_client_auth;
   ProxyDomainTokenStore domain_tokens;
   std::unique_ptr<scanner::IScanner> scanner;
   scanner::ScanContext scan_ctx;
@@ -290,5 +331,11 @@ struct Runtime {
     return expected_sig == parts[2] ? username : "";
   }
 };
+
+inline std::string client_ip_from_addr(const std::string& client_addr) {
+  auto pos = client_addr.rfind(':');
+  if (pos == std::string::npos) return client_addr;
+  return client_addr.substr(0, pos);
+}
 
 }  // namespace openscanproxy::proxy

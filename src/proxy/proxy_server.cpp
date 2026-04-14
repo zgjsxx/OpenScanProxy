@@ -119,6 +119,18 @@ std::string make_proxy_auth_required_response() {
   return os.str();
 }
 
+std::string make_portal_auth_required_response() {
+  static const std::string body =
+      "<html><body><h1>403 Portal Authentication Required</h1><p>OpenScanProxy portal login is required before this request can proceed.</p></body></html>";
+  std::ostringstream os;
+  os << "HTTP/1.1 403 Forbidden\r\n"
+     << "Content-Type: text/html; charset=utf-8\r\n"
+     << "Cache-Control: no-store\r\n"
+     << "Content-Length: " << body.size() << "\r\n\r\n"
+     << body;
+  return os.str();
+}
+
 std::string url_encode(const std::string& value) {
   static constexpr char kHex[] = "0123456789ABCDEF";
   std::string out;
@@ -189,6 +201,10 @@ bool should_redirect_to_portal_for_request(const std::map<std::string, std::stri
   auto fetch_dest = lower(http::header_get(headers, "Sec-Fetch-Dest"));
   if (fetch_mode == "navigate" || fetch_dest == "document") return true;
   return false;
+}
+
+bool should_allow_client_ip_auth_for_request(const std::map<std::string, std::string>& headers) {
+  return !should_redirect_to_portal_for_request(headers);
 }
 
 std::string absolute_request_url(const std::string& host, const std::string& uri, bool https) {
@@ -778,6 +794,7 @@ void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host,
     if (!http::parse_request(raw_req, req)) break;
     auto resolved_user = user;
     const auto allow_portal_redirect = should_redirect_to_portal_for_request(req.headers);
+    const auto allow_client_ip_auth = should_allow_client_ip_auth_for_request(req.headers);
     const auto absolute_url = absolute_request_url(host, req.uri, true);
     if (runtime_.config.enable_proxy_auth) {
       auto cookies = parse_cookie_header(http::header_get(req.headers, "Cookie"));
@@ -816,10 +833,28 @@ void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host,
           close(sfd);
           return;
         }
+        if (allow_client_ip_auth) {
+          resolved_user = runtime_.portal_client_auth.lookup_user(client_ip_from_addr(client_addr));
+          if (!resolved_user.empty()) {
+            runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, resolved_user, "allow", "proxy_portal_client_ip"));
+          }
+        }
         if (allow_portal_redirect) {
           auto response = make_portal_redirect_response(runtime_, absolute_url);
           ssl_write_all(client_ssl, response.data(), response.size());
           runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, "", "redirect", "proxy_auth_portal"));
+          SSL_shutdown(client_ssl);
+          SSL_shutdown(upstream_ssl);
+          SSL_free(client_ssl);
+          SSL_free(upstream_ssl);
+          close(sfd);
+          return;
+        }
+        if (resolved_user.empty() && !allow_portal_redirect && !runtime_.proxy_basic_enabled()) {
+          auto response = make_portal_auth_required_response();
+          ssl_write_all(client_ssl, response.data(), response.size());
+          runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, "", "block", "proxy_portal_client_ip_miss",
+                                                    "non_navigation_missing_portal_auth"));
           SSL_shutdown(client_ssl);
           SSL_shutdown(upstream_ssl);
           SSL_free(client_ssl);
@@ -988,6 +1023,7 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
   auto resolved_user = user;
   const auto secure_cookie = false;
   const auto allow_portal_redirect = should_redirect_to_portal_for_request(req.headers);
+  const auto allow_client_ip_auth = should_allow_client_ip_auth_for_request(req.headers);
   const auto absolute_url = absolute_request_url(host_h, req.uri, false);
   const auto portal_target = target_is_portal_endpoint(runtime_, host, port);
   if (runtime_.config.enable_proxy_auth && !portal_target) {
@@ -1016,10 +1052,23 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
         runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, "", "block", "proxy_portal_token", "invalid_or_expired_token"));
         return false;
       }
+      if (allow_client_ip_auth) {
+        resolved_user = runtime_.portal_client_auth.lookup_user(client_ip_from_addr(client_addr));
+        if (!resolved_user.empty()) {
+          runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, resolved_user, "allow", "proxy_portal_client_ip"));
+        }
+      }
       if (allow_portal_redirect && (runtime_.config.proxy_auth_mode == "portal" || browser_like_request(req.headers))) {
         auto response = make_portal_redirect_response(runtime_, absolute_url);
         send(cfd, response.data(), response.size(), 0);
         runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, "", "redirect", "proxy_auth_portal"));
+        return false;
+      }
+      if (resolved_user.empty() && !allow_portal_redirect && !runtime_.proxy_basic_enabled()) {
+        auto response = make_portal_auth_required_response();
+        send(cfd, response.data(), response.size(), 0);
+        runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, "", "block", "proxy_portal_client_ip_miss",
+                                                   "non_navigation_missing_portal_auth"));
         return false;
       }
     }
