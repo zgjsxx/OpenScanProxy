@@ -37,7 +37,7 @@ int main(int argc, char** argv) {
     core::app_logger().log(core::LogLevel::Info, "admin static dir: " + cfg.admin_static_dir);
 
     if (cfg.enable_https_mitm || cfg.enable_proxy_auth) {
-      if (!runtime.tls_mitm.initialize(cfg.ca_cert_path, cfg.ca_key_path)) {
+      if (!runtime.tls_mitm.initialize(cfg.ca_cert_path, cfg.ca_key_path, cfg.tls_leaf_cache_enabled, cfg.tls_leaf_cache_dir)) {
         core::app_logger().log(core::LogLevel::Error, "failed to initialize TLS MITM engine");
       }
     }

@@ -76,6 +76,8 @@ AppConfig ConfigLoader::load_from_file(const std::string& path) {
   GET_S("ca_cert_path", ca_cert_path);
   GET_S("ca_key_path", ca_key_path);
   GET_B("enable_https_mitm", enable_https_mitm);
+  GET_B("tls_leaf_cache_enabled", tls_leaf_cache_enabled);
+  GET_S("tls_leaf_cache_dir", tls_leaf_cache_dir);
   GET_B("scan_upload", scan_upload);
   GET_B("scan_download", scan_download);
   GET_US("max_scan_file_size", max_scan_file_size);
@@ -134,6 +136,7 @@ AppConfig ConfigLoader::load_from_file(const std::string& path) {
   if (cfg.proxy_auth_signing_key.empty()) {
     cfg.proxy_auth_signing_key = cfg.admin_password + ":" + cfg.proxy_auth_password + ":openscanproxy";
   }
+  if (cfg.tls_leaf_cache_dir.empty()) cfg.tls_leaf_cache_dir = "./certs/cache";
   return cfg;
 }
 

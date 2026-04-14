@@ -7,6 +7,8 @@
   "ca_cert_path": "./certs/ca.crt",
   "ca_key_path": "./certs/ca.key",
   "enable_https_mitm": false,
+  "tls_leaf_cache_enabled": true,
+  "tls_leaf_cache_dir": "./certs/cache",
   "scan_upload": true,
   "scan_download": true,
   "max_scan_file_size": 5242880,

@@ -18,6 +18,8 @@ struct AppConfig {
   std::string ca_cert_path{"./certs/ca.crt"};
   std::string ca_key_path{"./certs/ca.key"};
   bool enable_https_mitm{false};
+  bool tls_leaf_cache_enabled{true};
+  std::string tls_leaf_cache_dir{"./certs/cache"};
 
   bool scan_upload{true};
   bool scan_download{true};
