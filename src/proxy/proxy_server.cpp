@@ -183,6 +183,15 @@ bool browser_like_request(const std::map<std::string, std::string>& headers) {
   return !ua.empty() && (accept.empty() || accept.find("text/html") != std::string::npos || accept.find("*/*") != std::string::npos);
 }
 
+bool should_bypass_portal_auth_for_request(const std::map<std::string, std::string>& headers) {
+  // Temporary compatibility mode: allow script-driven CORS/fetch requests to pass
+  // through without interactive portal auth so pages can keep loading.
+  auto fetch_mode = lower(http::header_get(headers, "Sec-Fetch-Mode"));
+  auto fetch_dest = lower(http::header_get(headers, "Sec-Fetch-Dest"));
+  if ((fetch_mode == "cors" || fetch_mode == "no-cors") && fetch_dest == "empty") return true;
+  return false;
+}
+
 std::string absolute_request_url(const std::string& host, const std::string& uri, bool https) {
   if (uri.rfind("http://", 0) == 0 || uri.rfind("https://", 0) == 0) return uri;
   auto path = uri.empty() ? "/" : uri;
@@ -769,6 +778,7 @@ void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host,
     http::HttpRequest req;
     if (!http::parse_request(raw_req, req)) break;
     auto resolved_user = user;
+    const auto bypass_portal_auth = should_bypass_portal_auth_for_request(req.headers);
     const auto absolute_url = absolute_request_url(host, req.uri, true);
     if (runtime_.config.enable_proxy_auth) {
       auto cookies = parse_cookie_header(http::header_get(req.headers, "Cookie"));
@@ -781,7 +791,7 @@ void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host,
           }
         }
       }
-      if (resolved_user.empty() && runtime_.portal_auth_enabled()) {
+      if (resolved_user.empty() && runtime_.portal_auth_enabled() && !bypass_portal_auth) {
         auto auth_token = extract_auth_token_from_url(req.uri);
         if (!auth_token.empty()) {
           auto token_user = runtime_.domain_tokens.consume(auth_token, host);
@@ -817,7 +827,7 @@ void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host,
         close(sfd);
         return;
       }
-      if (resolved_user.empty() && runtime_.proxy_basic_enabled()) {
+      if (resolved_user.empty() && runtime_.proxy_basic_enabled() && !bypass_portal_auth) {
         auto response = make_proxy_auth_required_response();
         ssl_write_all(client_ssl, response.data(), response.size());
         runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, "", "block", "proxy_basic_fallback",
@@ -976,6 +986,7 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
   auto [host, port] = split_host_port(host_h, 80);
   auto resolved_user = user;
   const auto secure_cookie = false;
+  const auto bypass_portal_auth = should_bypass_portal_auth_for_request(req.headers);
   const auto absolute_url = absolute_request_url(host_h, req.uri, false);
   const auto portal_target = target_is_portal_endpoint(runtime_, host, port);
   if (runtime_.config.enable_proxy_auth && !portal_target) {
@@ -989,7 +1000,7 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
         }
       }
     }
-    if (resolved_user.empty() && runtime_.portal_auth_enabled()) {
+    if (resolved_user.empty() && runtime_.portal_auth_enabled() && !bypass_portal_auth) {
       auto auth_token = extract_auth_token_from_url(req.uri);
       if (!auth_token.empty()) {
         auto token_user = runtime_.domain_tokens.consume(auth_token, host);
@@ -1011,7 +1022,7 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
         return false;
       }
     }
-    if (resolved_user.empty() && runtime_.proxy_basic_enabled()) {
+    if (resolved_user.empty() && runtime_.proxy_basic_enabled() && !bypass_portal_auth) {
       auto response = make_proxy_auth_required_response();
       send(cfd, response.data(), response.size(), 0);
       runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, "", "block", "proxy_basic_fallback",
