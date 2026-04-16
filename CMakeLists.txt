@@ -60,4 +60,7 @@ if(BUILD_TESTING)
   add_test(NAME http_message_test COMMAND http_message_test)
   add_test(NAME http_protocol_test COMMAND http_protocol_test)
   add_test(NAME policy_test COMMAND policy_test)
+  set_tests_properties(http_message_test http_protocol_test policy_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  )
 endif()

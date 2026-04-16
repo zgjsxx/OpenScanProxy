@@ -2,7 +2,6 @@
 
 #include "openscanproxy/audit/audit.hpp"
 #include "openscanproxy/config/config.hpp"
-#include "openscanproxy/core/logger.hpp"
 #include "openscanproxy/core/util.hpp"
 #include "openscanproxy/extractor/extractor.hpp"
 #include "openscanproxy/policy/policy.hpp"
@@ -187,80 +186,30 @@ class PortalClientAuthStore {
     if (client_ip.empty() || username.empty()) return;
     std::lock_guard<std::mutex> lk(mu_);
     auto now = std::chrono::system_clock::now();
-    auto expires_at = now + std::chrono::seconds(ttl_sec);
-    clients_[client_ip] = PortalClientAuth{username, expires_at, now};
-    core::app_logger().log(core::LogLevel::Info,
-                           "portal client-ip cache: upsert client_ip=" + client_ip +
-                               " user=" + username +
-                               " ttl_sec=" + std::to_string(ttl_sec) +
-                               " expires_at=" + format_time_point(expires_at) +
-                               " size=" + std::to_string(clients_.size()));
+    clients_[client_ip] = PortalClientAuth{username, now + std::chrono::seconds(ttl_sec), now};
   }
 
   std::string lookup_user(const std::string& client_ip) {
     if (client_ip.empty()) return "";
     std::lock_guard<std::mutex> lk(mu_);
     auto it = clients_.find(client_ip);
-    if (it == clients_.end()) {
-      core::app_logger().log(core::LogLevel::Warn,
-                             "portal client-ip cache: miss client_ip=" + client_ip +
-                                 " size=" + std::to_string(clients_.size()));
-      return "";
-    }
+    if (it == clients_.end()) return "";
     auto now = std::chrono::system_clock::now();
     if (it->second.expires_at <= now) {
-      core::app_logger().log(core::LogLevel::Warn,
-                             "portal client-ip cache: expired client_ip=" + client_ip +
-                                 " user=" + it->second.username +
-                                 " expires_at=" + format_time_point(it->second.expires_at) +
-                                 " now=" + format_time_point(now));
       clients_.erase(it);
-      core::app_logger().log(core::LogLevel::Info,
-                             "portal client-ip cache: erase-expired client_ip=" + client_ip +
-                                 " size=" + std::to_string(clients_.size()));
       return "";
     }
     it->second.last_seen_at = now;
-    core::app_logger().log(core::LogLevel::Info,
-                           "portal client-ip cache: hit client_ip=" + client_ip +
-                               " user=" + it->second.username +
-                               " expires_at=" + format_time_point(it->second.expires_at) +
-                               " last_seen_at=" + format_time_point(it->second.last_seen_at));
     return it->second.username;
   }
 
   void destroy(const std::string& client_ip) {
     if (client_ip.empty()) return;
     std::lock_guard<std::mutex> lk(mu_);
-    auto it = clients_.find(client_ip);
-    if (it == clients_.end()) {
-      core::app_logger().log(core::LogLevel::Info,
-                             "portal client-ip cache: destroy-miss client_ip=" + client_ip +
-                                 " size=" + std::to_string(clients_.size()));
-      return;
-    }
-    auto username = it->second.username;
-    clients_.erase(it);
-    core::app_logger().log(core::LogLevel::Info,
-                           "portal client-ip cache: destroy client_ip=" + client_ip +
-                               " user=" + username +
-                               " size=" + std::to_string(clients_.size()));
+    clients_.erase(client_ip);
   }
 
  private:
-  static std::string format_time_point(const std::chrono::system_clock::time_point& tp) {
-    auto tt = std::chrono::system_clock::to_time_t(tp);
-    std::tm tm{};
-#ifdef _WIN32
-    gmtime_s(&tm, &tt);
-#else
-    gmtime_r(&tt, &tm);
-#endif
-    char buf[32];
-    if (std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm) == 0) return "";
-    return buf;
-  }
-
   std::mutex mu_;
   std::unordered_map<std::string, PortalClientAuth> clients_;
 };
