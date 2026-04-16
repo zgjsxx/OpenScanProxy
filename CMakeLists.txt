@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(OpenSSL REQUIRED)
-enable_testing()
+include(CTest)
 
 add_executable(openscanproxy
   cmd/openscanproxy/main.cpp
@@ -32,30 +32,32 @@ target_link_libraries(openscanproxy PRIVATE OpenSSL::SSL OpenSSL::Crypto pthread
 set(ADMIN_STATIC_DIR_DEFAULT "${CMAKE_SOURCE_DIR}/web/dist" CACHE PATH "Default admin static asset directory")
 message(STATUS "Admin static assets directory: ${ADMIN_STATIC_DIR_DEFAULT}")
 
-add_executable(http_message_test
-  tests/http_message_test.cpp
-  src/core/util.cpp
-  src/http/http_message.cpp
-)
-target_include_directories(http_message_test PRIVATE include)
-target_link_libraries(http_message_test PRIVATE OpenSSL::Crypto)
+if(BUILD_TESTING)
+  add_executable(http_message_test
+    tests/http_message_test.cpp
+    src/core/util.cpp
+    src/http/http_message.cpp
+  )
+  target_include_directories(http_message_test PRIVATE include)
+  target_link_libraries(http_message_test PRIVATE OpenSSL::Crypto)
 
-add_executable(policy_test
-  tests/policy_test.cpp
-  src/core/util.cpp
-  src/policy/policy.cpp
-)
-target_include_directories(policy_test PRIVATE include)
-target_link_libraries(policy_test PRIVATE OpenSSL::Crypto)
+  add_executable(policy_test
+    tests/policy_test.cpp
+    src/core/util.cpp
+    src/policy/policy.cpp
+  )
+  target_include_directories(policy_test PRIVATE include)
+  target_link_libraries(policy_test PRIVATE OpenSSL::Crypto)
 
-add_executable(http_protocol_test
-  tests/http_protocol_test.cpp
-  src/core/util.cpp
-  src/http/http_message.cpp
-)
-target_include_directories(http_protocol_test PRIVATE include)
-target_link_libraries(http_protocol_test PRIVATE OpenSSL::Crypto)
+  add_executable(http_protocol_test
+    tests/http_protocol_test.cpp
+    src/core/util.cpp
+    src/http/http_message.cpp
+  )
+  target_include_directories(http_protocol_test PRIVATE include)
+  target_link_libraries(http_protocol_test PRIVATE OpenSSL::Crypto)
 
-add_test(NAME http_message_test COMMAND http_message_test)
-add_test(NAME http_protocol_test COMMAND http_protocol_test)
-add_test(NAME policy_test COMMAND policy_test)
+  add_test(NAME http_message_test COMMAND http_message_test)
+  add_test(NAME http_protocol_test COMMAND http_protocol_test)
+  add_test(NAME policy_test COMMAND policy_test)
+endif()
