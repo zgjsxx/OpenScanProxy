@@ -131,7 +131,7 @@ std::string make_portal_auth_required_response() {
   return os.str();
 }
 
-std::string safe_header_value(const std::map<std::string, std::string>& headers, const std::string& key) {
+std::string safe_header_value(const http::Headers& headers, const std::string& key) {
   auto value = http::header_get(headers, key);
   return value.empty() ? "-" : value;
 }
@@ -194,13 +194,13 @@ std::string portal_login_url(const proxy::Runtime& runtime, const std::string& r
          std::to_string(runtime.config.proxy_auth_portal_listen_port) + "/login?return_to=" + url_encode(return_to);
 }
 
-bool browser_like_request(const std::map<std::string, std::string>& headers) {
+bool browser_like_request(const http::Headers& headers) {
   auto ua = http::header_get(headers, "User-Agent");
   auto accept = lower(http::header_get(headers, "Accept"));
   return !ua.empty() && (accept.empty() || accept.find("text/html") != std::string::npos || accept.find("*/*") != std::string::npos);
 }
 
-bool should_redirect_to_portal_for_request(const std::map<std::string, std::string>& headers) {
+bool should_redirect_to_portal_for_request(const http::Headers& headers) {
   // Interactive portal redirects should only happen for top-level navigations.
   auto fetch_mode = lower(http::header_get(headers, "Sec-Fetch-Mode"));
   auto fetch_dest = lower(http::header_get(headers, "Sec-Fetch-Dest"));
@@ -208,7 +208,7 @@ bool should_redirect_to_portal_for_request(const std::map<std::string, std::stri
   return false;
 }
 
-bool should_allow_client_ip_auth_for_request(const std::map<std::string, std::string>& headers) {
+bool should_allow_client_ip_auth_for_request(const http::Headers& headers) {
   return !should_redirect_to_portal_for_request(headers);
 }
 
@@ -379,7 +379,7 @@ std::string make_block_notification_response(const std::string& reason, const st
 }
 
 std::string format_request_headers_for_debug(const std::string& method, const std::string& target,
-                                             const std::map<std::string, std::string>& headers) {
+                                             const http::Headers& headers) {
   std::ostringstream os;
   os << "request " << method << " " << target << " headers={";
   bool first = true;
@@ -407,7 +407,7 @@ bool send_all(int fd, const char* data, std::size_t size) {
   return true;
 }
 
-bool parse_content_length_header(const std::map<std::string, std::string>& headers, std::size_t& content_length) {
+bool parse_content_length_header(const http::Headers& headers, std::size_t& content_length) {
   auto raw = http::header_get(headers, "Content-Length");
   if (raw.empty()) {
     content_length = 0;
@@ -421,7 +421,7 @@ bool parse_content_length_header(const std::map<std::string, std::string>& heade
   return true;
 }
 
-bool has_chunked_encoding(const std::map<std::string, std::string>& headers) {
+bool has_chunked_encoding(const http::Headers& headers) {
   auto te = core::to_lower(http::header_get(headers, "Transfer-Encoding"));
   return te.find("chunked") != std::string::npos;
 }
@@ -461,7 +461,7 @@ std::string sanitize_identity(std::string value) {
   return core::trim(value);
 }
 
-std::string authenticate_proxy_request(const ProxyAuthStore& auth_store, const std::map<std::string, std::string>& headers) {
+std::string authenticate_proxy_request(const ProxyAuthStore& auth_store, const http::Headers& headers) {
   if (!auth_store.enabled()) return "";
   auto auth = http::header_get(headers, "Proxy-Authorization");
   if (auth.empty()) return "";
@@ -479,7 +479,7 @@ std::string authenticate_proxy_request(const ProxyAuthStore& auth_store, const s
 }
 
 bool parse_response_head(const std::string& raw_head, std::string& version, int& status,
-                         std::map<std::string, std::string>& headers) {
+                         http::Headers& headers) {
   headers.clear();
   auto line_end = raw_head.find("\r\n");
   if (line_end == std::string::npos) return false;
@@ -492,7 +492,7 @@ bool parse_response_head(const std::string& raw_head, std::string& version, int&
     if (hline.empty()) continue;
     auto pos = hline.find(':');
     if (pos == std::string::npos) return false;
-    headers[core::trim(hline.substr(0, pos))] = core::trim(hline.substr(pos + 1));
+    http::header_add(headers, core::trim(hline.substr(0, pos)), core::trim(hline.substr(pos + 1)));
   }
   return true;
 }
@@ -521,7 +521,7 @@ bool ssl_read_http_message(SSL* ssl, std::string& pending, std::string& raw_mess
   if (line_end == std::string::npos || line_end > header_end) return false;
 
   std::size_t content_length = 0;
-  std::map<std::string, std::string> headers;
+  http::Headers headers;
   std::istringstream hs(pending.substr(line_end + 2, header_end - line_end - 2));
   std::string hline;
   while (std::getline(hs, hline)) {
@@ -529,7 +529,7 @@ bool ssl_read_http_message(SSL* ssl, std::string& pending, std::string& raw_mess
     if (hline.empty()) continue;
     auto pos = hline.find(':');
     if (pos == std::string::npos) return false;
-    headers[core::trim(hline.substr(0, pos))] = core::trim(hline.substr(pos + 1));
+    http::header_add(headers, core::trim(hline.substr(0, pos)), core::trim(hline.substr(pos + 1)));
   }
 
   auto chunked = has_chunked_encoding(headers);
@@ -640,7 +640,7 @@ void ProxyServer::handle_client(int cfd, const std::string& client_addr) {
     if (method.empty()) break;
 
     std::size_t content_length = 0;
-    std::map<std::string, std::string> headers;
+    http::Headers headers;
     std::istringstream hs(pending.substr(line_end + 2, header_end - line_end - 2));
     std::string hline;
     while (std::getline(hs, hline)) {
@@ -648,7 +648,7 @@ void ProxyServer::handle_client(int cfd, const std::string& client_addr) {
       if (hline.empty()) continue;
       auto pos = hline.find(':');
       if (pos == std::string::npos) break;
-      headers[core::trim(hline.substr(0, pos))] = core::trim(hline.substr(pos + 1));
+      http::header_add(headers, core::trim(hline.substr(0, pos)), core::trim(hline.substr(pos + 1)));
     }
     auto is_chunked = has_chunked_encoding(headers);
     if (core::app_logger().should_log(core::LogLevel::Debug)) {
@@ -1187,8 +1187,7 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
     runtime_.audit.write(make_access_event(core::now_iso8601(), client_addr, host, req.uri, req.method, 502, ms, bytes_in, 0, false, resolved_user));
     return false;
   }
-  req.headers.erase("Proxy-Authorization");
-  req.headers.erase("proxy-authorization");
+  http::header_erase(req.headers, "Proxy-Authorization");
   req.uri = to_origin_form_uri(strip_auth_token_from_url(req.uri));
   auto forward_raw = http::serialize_request(req);
   if (!send_all(sfd, forward_raw.data(), forward_raw.size())) {
@@ -1221,7 +1220,7 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
       header_end = upstream_for_parse.find("\r\n\r\n");
       if (header_end != std::string::npos) {
         std::string response_version;
-        std::map<std::string, std::string> response_headers;
+        http::Headers response_headers;
         auto header_only = upstream_for_parse.substr(0, header_end + 2);
         if (!parse_response_head(header_only, response_version, final_status, response_headers)) {
           parseable = false;

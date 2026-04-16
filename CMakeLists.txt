@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(OpenSSL REQUIRED)
+enable_testing()
 
 add_executable(openscanproxy
   cmd/openscanproxy/main.cpp
@@ -46,3 +47,15 @@ add_executable(policy_test
 )
 target_include_directories(policy_test PRIVATE include)
 target_link_libraries(policy_test PRIVATE OpenSSL::Crypto)
+
+add_executable(http_protocol_test
+  tests/http_protocol_test.cpp
+  src/core/util.cpp
+  src/http/http_message.cpp
+)
+target_include_directories(http_protocol_test PRIVATE include)
+target_link_libraries(http_protocol_test PRIVATE OpenSSL::Crypto)
+
+add_test(NAME http_message_test COMMAND http_message_test)
+add_test(NAME http_protocol_test COMMAND http_protocol_test)
+add_test(NAME policy_test COMMAND policy_test)

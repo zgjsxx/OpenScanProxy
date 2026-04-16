@@ -3,12 +3,17 @@
 #include "openscanproxy/core/util.hpp"
 
 #include <charconv>
+#include <algorithm>
 #include <sstream>
 
 namespace openscanproxy::http {
 namespace {
 
-bool parse_headers_block(const std::string& block, std::map<std::string, std::string>& headers) {
+bool header_name_equals(const std::string& lhs, const std::string& rhs) {
+  return core::to_lower(lhs) == core::to_lower(rhs);
+}
+
+bool parse_headers_block(const std::string& block, Headers& headers) {
   std::istringstream is(block);
   std::string line;
   while (std::getline(is, line)) {
@@ -16,12 +21,12 @@ bool parse_headers_block(const std::string& block, std::map<std::string, std::st
     if (line.empty()) continue;
     auto pos = line.find(':');
     if (pos == std::string::npos) return false;
-    headers[core::trim(line.substr(0, pos))] = core::trim(line.substr(pos + 1));
+    headers.emplace_back(core::trim(line.substr(0, pos)), core::trim(line.substr(pos + 1)));
   }
   return true;
 }
 
-bool parse_content_length(const std::map<std::string, std::string>& headers, std::size_t& out) {
+bool parse_content_length(const Headers& headers, std::size_t& out) {
   auto raw = header_get(headers, "Content-Length");
   if (raw.empty()) {
     out = 0;
@@ -36,12 +41,12 @@ bool parse_content_length(const std::map<std::string, std::string>& headers, std
   return true;
 }
 
-bool is_chunked(const std::map<std::string, std::string>& headers) {
+bool is_chunked(const Headers& headers) {
   auto te = core::to_lower(header_get(headers, "Transfer-Encoding"));
   return te.find("chunked") != std::string::npos;
 }
 
-bool parse_message_body(const std::string& raw, std::size_t body_start, const std::map<std::string, std::string>& headers,
+bool parse_message_body(const std::string& raw, std::size_t body_start, const Headers& headers,
                         std::vector<std::uint8_t>& body, std::size_t* consumed) {
   body.clear();
   if (is_chunked(headers)) {
@@ -63,12 +68,32 @@ bool parse_message_body(const std::string& raw, std::size_t body_start, const st
 
 }  // namespace
 
-std::string header_get(const std::map<std::string, std::string>& headers, const std::string& key) {
-  auto lk = core::to_lower(key);
+std::string header_get(const Headers& headers, const std::string& key) {
+  auto values = header_get_all(headers, key);
+  return values.empty() ? "" : values.back();
+}
+
+std::vector<std::string> header_get_all(const Headers& headers, const std::string& key) {
+  std::vector<std::string> out;
   for (const auto& [k, v] : headers) {
-    if (core::to_lower(k) == lk) return v;
+    if (header_name_equals(k, key)) out.push_back(v);
   }
-  return "";
+  return out;
+}
+
+void header_add(Headers& headers, std::string key, std::string value) {
+  headers.emplace_back(std::move(key), std::move(value));
+}
+
+void header_set(Headers& headers, std::string key, std::string value) {
+  header_erase(headers, key);
+  header_add(headers, std::move(key), std::move(value));
+}
+
+void header_erase(Headers& headers, const std::string& key) {
+  headers.erase(std::remove_if(headers.begin(), headers.end(), [&](const auto& item) {
+    return header_name_equals(item.first, key);
+  }), headers.end());
 }
 
 bool parse_request(const std::string& raw, HttpRequest& req) { return parse_request(raw, req, nullptr); }
@@ -208,7 +233,7 @@ std::string serialize_response(const HttpResponse& resp) {
   return os.str();
 }
 
-bool message_should_close(const std::string& version, const std::map<std::string, std::string>& headers) {
+bool message_should_close(const std::string& version, const Headers& headers) {
   auto connection = core::to_lower(header_get(headers, "Connection"));
   if (connection.find("close") != std::string::npos) return true;
   if (version == "HTTP/1.0") return connection.find("keep-alive") == std::string::npos;

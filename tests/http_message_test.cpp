@@ -56,6 +56,21 @@ bool test_invalid_message() {
   return expect(!openscanproxy::http::parse_request(raw, req), "reject short content-length body");
 }
 
+bool test_duplicate_headers_preserved_in_response() {
+  const std::string raw =
+      "HTTP/1.1 200 OK\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\nWarning: 199 misc\r\nWarning: 299 misc2\r\n\r\n";
+  HttpResponse resp;
+  if (!expect(openscanproxy::http::parse_response(raw, resp), "parse response with duplicate headers")) return false;
+  auto cookies = openscanproxy::http::header_get_all(resp.headers, "Set-Cookie");
+  auto warnings = openscanproxy::http::header_get_all(resp.headers, "Warning");
+  auto serialized = openscanproxy::http::serialize_response(resp);
+  return expect(cookies.size() == 2, "preserve duplicate set-cookie count") &&
+         expect(cookies[0] == "a=1" && cookies[1] == "b=2", "preserve duplicate set-cookie order") &&
+         expect(warnings.size() == 2, "preserve duplicate warning count") &&
+         expect(serialized.find("Set-Cookie: a=1\r\nSet-Cookie: b=2\r\n") != std::string::npos, "serialize duplicate set-cookie headers") &&
+         expect(serialized.find("Warning: 199 misc\r\nWarning: 299 misc2\r\n") != std::string::npos, "serialize duplicate warning headers");
+}
+
 }  // namespace
 
 int main() {
@@ -65,6 +80,7 @@ int main() {
   ok = test_response_chunked() && ok;
   ok = test_chunked_encode_roundtrip() && ok;
   ok = test_invalid_message() && ok;
+  ok = test_duplicate_headers_preserved_in_response() && ok;
   if (ok) {
     std::cout << "All http_message tests passed\n";
     return 0;
