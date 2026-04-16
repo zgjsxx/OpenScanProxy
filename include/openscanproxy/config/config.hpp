@@ -64,6 +64,7 @@ struct AppConfig {
   uint16_t proxy_auth_portal_listen_port{9091};
   std::string proxy_auth_cookie_name{"osp_proxy_auth"};
   std::string proxy_auth_portal_cookie_name{"osp_portal_session"};
+  std::string proxy_auth_client_cache_file{"./configs/portal_client_auth_cache.json"};
   std::uint64_t proxy_auth_token_ttl_sec{120};
   std::uint64_t proxy_auth_portal_session_ttl_sec{3600};
   std::string proxy_auth_signing_key{"change-me"};

@@ -2,6 +2,7 @@
 
 #include "openscanproxy/audit/audit.hpp"
 #include "openscanproxy/config/config.hpp"
+#include "openscanproxy/core/logger.hpp"
 #include "openscanproxy/core/util.hpp"
 #include "openscanproxy/extractor/extractor.hpp"
 #include "openscanproxy/policy/policy.hpp"
@@ -11,6 +12,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -182,35 +184,201 @@ struct PortalClientAuth {
 
 class PortalClientAuthStore {
  public:
+  explicit PortalClientAuthStore(const config::AppConfig& cfg) : cache_file_(cfg.proxy_auth_client_cache_file) {
+    load_from_file();
+  }
+
   void upsert(const std::string& client_ip, const std::string& username, std::uint64_t ttl_sec) {
     if (client_ip.empty() || username.empty()) return;
     std::lock_guard<std::mutex> lk(mu_);
     auto now = std::chrono::system_clock::now();
-    clients_[client_ip] = PortalClientAuth{username, now + std::chrono::seconds(ttl_sec), now};
+    auto expires_at = now + std::chrono::seconds(ttl_sec);
+    clients_[client_ip] = PortalClientAuth{username, expires_at, now};
+    persist_to_file_locked();
+    core::app_logger().log(core::LogLevel::Info,
+                           "portal client-ip cache: upsert client_ip=" + client_ip +
+                               " user=" + username +
+                               " ttl_sec=" + std::to_string(ttl_sec) +
+                               " expires_at=" + format_time_point(expires_at) +
+                               " size=" + std::to_string(clients_.size()));
   }
 
   std::string lookup_user(const std::string& client_ip) {
     if (client_ip.empty()) return "";
     std::lock_guard<std::mutex> lk(mu_);
     auto it = clients_.find(client_ip);
-    if (it == clients_.end()) return "";
+    if (it == clients_.end()) {
+      core::app_logger().log(core::LogLevel::Warn,
+                             "portal client-ip cache: miss client_ip=" + client_ip +
+                                 " size=" + std::to_string(clients_.size()));
+      return "";
+    }
     auto now = std::chrono::system_clock::now();
     if (it->second.expires_at <= now) {
+      core::app_logger().log(core::LogLevel::Warn,
+                             "portal client-ip cache: expired client_ip=" + client_ip +
+                                 " user=" + it->second.username +
+                                 " expires_at=" + format_time_point(it->second.expires_at) +
+                                 " now=" + format_time_point(now));
       clients_.erase(it);
+      persist_to_file_locked();
+      core::app_logger().log(core::LogLevel::Info,
+                             "portal client-ip cache: erase-expired client_ip=" + client_ip +
+                                 " size=" + std::to_string(clients_.size()));
       return "";
     }
     it->second.last_seen_at = now;
+    core::app_logger().log(core::LogLevel::Info,
+                           "portal client-ip cache: hit client_ip=" + client_ip +
+                               " user=" + it->second.username +
+                               " expires_at=" + format_time_point(it->second.expires_at) +
+                               " last_seen_at=" + format_time_point(it->second.last_seen_at));
     return it->second.username;
   }
 
   void destroy(const std::string& client_ip) {
     if (client_ip.empty()) return;
     std::lock_guard<std::mutex> lk(mu_);
-    clients_.erase(client_ip);
+    auto it = clients_.find(client_ip);
+    if (it == clients_.end()) {
+      core::app_logger().log(core::LogLevel::Info,
+                             "portal client-ip cache: destroy-miss client_ip=" + client_ip +
+                                 " size=" + std::to_string(clients_.size()));
+      return;
+    }
+    auto username = it->second.username;
+    clients_.erase(it);
+    persist_to_file_locked();
+    core::app_logger().log(core::LogLevel::Info,
+                           "portal client-ip cache: destroy client_ip=" + client_ip +
+                               " user=" + username +
+                               " size=" + std::to_string(clients_.size()));
   }
 
  private:
-  std::mutex mu_;
+  static std::string json_escape(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    for (char c : in) {
+      switch (c) {
+        case '"': out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default: out.push_back(c); break;
+      }
+    }
+    return out;
+  }
+
+  static std::string format_time_point(const std::chrono::system_clock::time_point& tp) {
+    auto tt = std::chrono::system_clock::to_time_t(tp);
+    std::tm tm{};
+#ifdef _WIN32
+    gmtime_s(&tm, &tt);
+#else
+    gmtime_r(&tt, &tm);
+#endif
+    char buf[32];
+    if (std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm) == 0) return "";
+    return buf;
+  }
+
+  void load_from_file() {
+    std::lock_guard<std::mutex> lk(mu_);
+    load_from_file_locked();
+  }
+
+  void load_from_file_locked() {
+    clients_.clear();
+    if (cache_file_.empty() || !std::filesystem::exists(cache_file_)) return;
+
+    std::ifstream ifs(cache_file_);
+    if (!ifs) {
+      core::app_logger().log(core::LogLevel::Warn,
+                             "portal client-ip cache: failed to open cache file " + cache_file_);
+      return;
+    }
+
+    std::stringstream ss;
+    ss << ifs.rdbuf();
+    const auto text = ss.str();
+    std::regex item(
+        "\\{\\s*\\\"client_ip\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\\s*,\\s*\\\"username\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\\s*,\\s*\\\"expires_at\\\"\\s*:\\s*(\\d+)\\s*,\\s*\\\"last_seen_at\\\"\\s*:\\s*(\\d+)\\s*\\}");
+    auto now = std::chrono::system_clock::now();
+    std::size_t loaded = 0;
+    std::size_t skipped = 0;
+    for (std::sregex_iterator it(text.begin(), text.end(), item), end; it != end; ++it) {
+      const auto client_ip = (*it)[1].str();
+      const auto username = (*it)[2].str();
+      std::uint64_t expires_at_sec = 0;
+      std::uint64_t last_seen_at_sec = 0;
+      try {
+        expires_at_sec = static_cast<std::uint64_t>(std::stoull((*it)[3].str()));
+        last_seen_at_sec = static_cast<std::uint64_t>(std::stoull((*it)[4].str()));
+      } catch (...) {
+        ++skipped;
+        continue;
+      }
+      auto expires_at = std::chrono::system_clock::time_point{std::chrono::seconds(expires_at_sec)};
+      if (client_ip.empty() || username.empty() || expires_at <= now) {
+        ++skipped;
+        continue;
+      }
+      clients_[client_ip] = PortalClientAuth{
+          username,
+          expires_at,
+          std::chrono::system_clock::time_point{std::chrono::seconds(last_seen_at_sec)}};
+      ++loaded;
+    }
+
+    core::app_logger().log(core::LogLevel::Info,
+                           "portal client-ip cache: loaded file=" + cache_file_ +
+                               " entries=" + std::to_string(loaded) +
+                               " skipped=" + std::to_string(skipped));
+    if (skipped > 0) persist_to_file_locked();
+  }
+
+  void persist_to_file_locked() const {
+    if (cache_file_.empty()) return;
+    auto parent = std::filesystem::path(cache_file_).parent_path();
+    if (!parent.empty()) std::filesystem::create_directories(parent);
+
+    std::ofstream ofs(cache_file_, std::ios::trunc);
+    if (!ofs) {
+      core::app_logger().log(core::LogLevel::Warn,
+                             "portal client-ip cache: failed to persist cache file " + cache_file_);
+      return;
+    }
+
+    std::vector<std::string> ips;
+    ips.reserve(clients_.size());
+    for (const auto& [client_ip, _] : clients_) ips.push_back(client_ip);
+    std::sort(ips.begin(), ips.end());
+
+    ofs << "{\"clients\":[";
+    for (std::size_t i = 0; i < ips.size(); ++i) {
+      if (i) ofs << ",";
+      const auto& client_ip = ips[i];
+      const auto& entry = clients_.at(client_ip);
+      const auto expires_at_sec = std::chrono::duration_cast<std::chrono::seconds>(
+                                      entry.expires_at.time_since_epoch())
+                                      .count();
+      const auto last_seen_at_sec = std::chrono::duration_cast<std::chrono::seconds>(
+                                        entry.last_seen_at.time_since_epoch())
+                                        .count();
+      ofs << "{\"client_ip\":\"" << json_escape(client_ip)
+          << "\",\"username\":\"" << json_escape(entry.username)
+          << "\",\"expires_at\":" << expires_at_sec
+          << ",\"last_seen_at\":" << last_seen_at_sec
+          << "}";
+    }
+    ofs << "]}";
+  }
+
+  std::string cache_file_;
+  mutable std::mutex mu_;
   std::unordered_map<std::string, PortalClientAuth> clients_;
 };
 
@@ -275,6 +443,7 @@ struct Runtime {
   explicit Runtime(config::AppConfig cfg)
       : config(std::move(cfg)),
         proxy_auth(config),
+        portal_client_auth(config),
         policy(policy::PolicyConfig{config.policy_mode != "fail-close",
                                     config.suspicious_action == "block",
                                     config.domain_whitelist,

@@ -373,6 +373,25 @@ void AuthPortalServer::run() {
       auto cookies = parse_cookie_header(get_header(req, "Cookie"));
       auto portal_cookie_it = cookies.find(runtime_.config.proxy_auth_portal_cookie_name);
       auto current_user = portal_cookie_it == cookies.end() ? "" : runtime_.portal_sessions.lookup_user(portal_cookie_it->second);
+      auto client_ip = proxy::client_ip_from_addr(client_addr);
+      if (!current_user.empty()) {
+        auto cached_user = runtime_.portal_client_auth.lookup_user(client_ip);
+        if (cached_user.empty()) {
+          runtime_.portal_client_auth.upsert(client_ip, current_user, runtime_.config.proxy_auth_portal_session_ttl_sec);
+          core::app_logger().log(core::LogLevel::Info,
+                                 "auth portal diagnostic: restored client-ip cache from portal cookie user=" + current_user +
+                                     " client_addr=" + client_addr +
+                                     " client_ip=" + client_ip +
+                                     " ttl_sec=" + std::to_string(runtime_.config.proxy_auth_portal_session_ttl_sec));
+        } else if (cached_user != current_user) {
+          runtime_.portal_client_auth.upsert(client_ip, current_user, runtime_.config.proxy_auth_portal_session_ttl_sec);
+          core::app_logger().log(core::LogLevel::Warn,
+                                 "auth portal diagnostic: repaired mismatched client-ip cache cached_user=" + cached_user +
+                                     " cookie_user=" + current_user +
+                                     " client_addr=" + client_addr +
+                                     " client_ip=" + client_ip);
+        }
+      }
       auto query = parse_query(path);
       auto return_to = query.count("return_to") ? query.at("return_to") : "";
 
@@ -403,7 +422,6 @@ void AuthPortalServer::run() {
           resp = make_http_response(401, "Unauthorized", login_page_html(posted_return_to, "用户名或密码错误"));
         } else {
           auto session_id = runtime_.portal_sessions.create(username, runtime_.config.proxy_auth_portal_session_ttl_sec);
-          auto client_ip = proxy::client_ip_from_addr(client_addr);
           runtime_.portal_client_auth.upsert(client_ip, username, runtime_.config.proxy_auth_portal_session_ttl_sec);
           core::app_logger().log(core::LogLevel::Info,
                                  "auth portal diagnostic: login success user=" + username +
@@ -426,7 +444,6 @@ void AuthPortalServer::run() {
         }
       } else if (path == "/logout" && method == "POST") {
         if (portal_cookie_it != cookies.end()) runtime_.portal_sessions.destroy(portal_cookie_it->second);
-        auto client_ip = proxy::client_ip_from_addr(client_addr);
         runtime_.portal_client_auth.destroy(client_ip);
         core::app_logger().log(core::LogLevel::Info,
                                "auth portal diagnostic: logout client_addr=" + client_addr +
