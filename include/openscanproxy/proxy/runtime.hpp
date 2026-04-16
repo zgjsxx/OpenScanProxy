@@ -124,12 +124,24 @@ struct PortalSession {
 
 class PortalSessionStore {
  public:
+  explicit PortalSessionStore(const config::AppConfig& cfg) : sessions_file_(cfg.proxy_auth_portal_session_file) {
+    load_from_file();
+  }
+
   std::string create(const std::string& username, std::uint64_t ttl_sec) {
     if (username.empty()) return "";
     std::lock_guard<std::mutex> lk(mu_);
     auto id = random_token_locked(32);
     auto now = std::chrono::system_clock::now();
-    sessions_[id] = PortalSession{username, now + std::chrono::seconds(ttl_sec), now};
+    auto expires_at = now + std::chrono::seconds(ttl_sec);
+    sessions_[id] = PortalSession{username, expires_at, now};
+    persist_to_file_locked();
+    core::app_logger().log(core::LogLevel::Info,
+                           "portal session cache: create session_id=" + id.substr(0, 12) +
+                               " user=" + username +
+                               " ttl_sec=" + std::to_string(ttl_sec) +
+                               " expires_at=" + format_time_point(expires_at) +
+                               " size=" + std::to_string(sessions_.size()));
     return id;
   }
 
@@ -137,22 +149,178 @@ class PortalSessionStore {
     if (session_id.empty()) return "";
     std::lock_guard<std::mutex> lk(mu_);
     auto it = sessions_.find(session_id);
-    if (it == sessions_.end()) return "";
+    if (it == sessions_.end()) {
+      core::app_logger().log(core::LogLevel::Warn,
+                             "portal session cache: miss session_id=" + session_id.substr(0, std::min<std::size_t>(12, session_id.size())) +
+                                 " size=" + std::to_string(sessions_.size()));
+      return "";
+    }
     auto now = std::chrono::system_clock::now();
     if (it->second.expires_at <= now) {
+      core::app_logger().log(core::LogLevel::Warn,
+                             "portal session cache: expired session_id=" + session_id.substr(0, std::min<std::size_t>(12, session_id.size())) +
+                                 " user=" + it->second.username +
+                                 " expires_at=" + format_time_point(it->second.expires_at) +
+                                 " now=" + format_time_point(now));
       sessions_.erase(it);
+      persist_to_file_locked();
+      core::app_logger().log(core::LogLevel::Info,
+                             "portal session cache: erase-expired session_id=" + session_id.substr(0, std::min<std::size_t>(12, session_id.size())) +
+                                 " size=" + std::to_string(sessions_.size()));
       return "";
     }
     it->second.last_seen_at = now;
+    persist_to_file_locked();
+    core::app_logger().log(core::LogLevel::Info,
+                           "portal session cache: hit session_id=" + session_id.substr(0, std::min<std::size_t>(12, session_id.size())) +
+                               " user=" + it->second.username +
+                               " expires_at=" + format_time_point(it->second.expires_at) +
+                               " last_seen_at=" + format_time_point(it->second.last_seen_at));
     return it->second.username;
   }
 
   void destroy(const std::string& session_id) {
     std::lock_guard<std::mutex> lk(mu_);
-    sessions_.erase(session_id);
+    auto it = sessions_.find(session_id);
+    if (it == sessions_.end()) {
+      core::app_logger().log(core::LogLevel::Info,
+                             "portal session cache: destroy-miss session_id=" +
+                                 session_id.substr(0, std::min<std::size_t>(12, session_id.size())) +
+                                 " size=" + std::to_string(sessions_.size()));
+      return;
+    }
+    auto username = it->second.username;
+    sessions_.erase(it);
+    persist_to_file_locked();
+    core::app_logger().log(core::LogLevel::Info,
+                           "portal session cache: destroy session_id=" +
+                               session_id.substr(0, std::min<std::size_t>(12, session_id.size())) +
+                               " user=" + username +
+                               " size=" + std::to_string(sessions_.size()));
   }
 
  private:
+  static std::string json_escape(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    for (char c : in) {
+      switch (c) {
+        case '"': out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default: out.push_back(c); break;
+      }
+    }
+    return out;
+  }
+
+  static std::string format_time_point(const std::chrono::system_clock::time_point& tp) {
+    auto tt = std::chrono::system_clock::to_time_t(tp);
+    std::tm tm{};
+#ifdef _WIN32
+    gmtime_s(&tm, &tt);
+#else
+    gmtime_r(&tt, &tm);
+#endif
+    char buf[32];
+    if (std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm) == 0) return "";
+    return buf;
+  }
+
+  void load_from_file() {
+    std::lock_guard<std::mutex> lk(mu_);
+    load_from_file_locked();
+  }
+
+  void load_from_file_locked() {
+    sessions_.clear();
+    if (sessions_file_.empty() || !std::filesystem::exists(sessions_file_)) return;
+
+    std::ifstream ifs(sessions_file_);
+    if (!ifs) {
+      core::app_logger().log(core::LogLevel::Warn,
+                             "portal session cache: failed to open cache file " + sessions_file_);
+      return;
+    }
+
+    std::stringstream ss;
+    ss << ifs.rdbuf();
+    const auto text = ss.str();
+    std::regex item(
+        "\\{\\s*\\\"session_id\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\\s*,\\s*\\\"username\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\\s*,\\s*\\\"expires_at\\\"\\s*:\\s*(\\d+)\\s*,\\s*\\\"last_seen_at\\\"\\s*:\\s*(\\d+)\\s*\\}");
+    auto now = std::chrono::system_clock::now();
+    std::size_t loaded = 0;
+    std::size_t skipped = 0;
+    for (std::sregex_iterator it(text.begin(), text.end(), item), end; it != end; ++it) {
+      const auto session_id = (*it)[1].str();
+      const auto username = (*it)[2].str();
+      std::uint64_t expires_at_sec = 0;
+      std::uint64_t last_seen_at_sec = 0;
+      try {
+        expires_at_sec = static_cast<std::uint64_t>(std::stoull((*it)[3].str()));
+        last_seen_at_sec = static_cast<std::uint64_t>(std::stoull((*it)[4].str()));
+      } catch (...) {
+        ++skipped;
+        continue;
+      }
+      auto expires_at = std::chrono::system_clock::time_point{std::chrono::seconds(expires_at_sec)};
+      if (session_id.empty() || username.empty() || expires_at <= now) {
+        ++skipped;
+        continue;
+      }
+      sessions_[session_id] = PortalSession{
+          username,
+          expires_at,
+          std::chrono::system_clock::time_point{std::chrono::seconds(last_seen_at_sec)}};
+      ++loaded;
+    }
+
+    core::app_logger().log(core::LogLevel::Info,
+                           "portal session cache: loaded file=" + sessions_file_ +
+                               " entries=" + std::to_string(loaded) +
+                               " skipped=" + std::to_string(skipped));
+    if (skipped > 0) persist_to_file_locked();
+  }
+
+  void persist_to_file_locked() const {
+    if (sessions_file_.empty()) return;
+    auto parent = std::filesystem::path(sessions_file_).parent_path();
+    if (!parent.empty()) std::filesystem::create_directories(parent);
+
+    std::ofstream ofs(sessions_file_, std::ios::trunc);
+    if (!ofs) {
+      core::app_logger().log(core::LogLevel::Warn,
+                             "portal session cache: failed to persist cache file " + sessions_file_);
+      return;
+    }
+
+    std::vector<std::string> ids;
+    ids.reserve(sessions_.size());
+    for (const auto& [session_id, _] : sessions_) ids.push_back(session_id);
+    std::sort(ids.begin(), ids.end());
+
+    ofs << "{\"sessions\":[";
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+      if (i) ofs << ",";
+      const auto& session_id = ids[i];
+      const auto& entry = sessions_.at(session_id);
+      const auto expires_at_sec = std::chrono::duration_cast<std::chrono::seconds>(
+                                      entry.expires_at.time_since_epoch())
+                                      .count();
+      const auto last_seen_at_sec = std::chrono::duration_cast<std::chrono::seconds>(
+                                        entry.last_seen_at.time_since_epoch())
+                                        .count();
+      ofs << "{\"session_id\":\"" << json_escape(session_id)
+          << "\",\"username\":\"" << json_escape(entry.username)
+          << "\",\"expires_at\":" << expires_at_sec
+          << ",\"last_seen_at\":" << last_seen_at_sec
+          << "}";
+    }
+    ofs << "]}";
+  }
+
   std::string random_token_locked(std::size_t bytes) {
     static constexpr char kHex[] = "0123456789abcdef";
     std::string out;
@@ -165,6 +333,7 @@ class PortalSessionStore {
     return out;
   }
 
+  std::string sessions_file_;
   std::mutex mu_;
   std::unordered_map<std::string, PortalSession> sessions_;
   std::mt19937_64 rng_{std::random_device{}()};
@@ -443,6 +612,7 @@ struct Runtime {
   explicit Runtime(config::AppConfig cfg)
       : config(std::move(cfg)),
         proxy_auth(config),
+        portal_sessions(config),
         portal_client_auth(config),
         policy(policy::PolicyConfig{config.policy_mode != "fail-close",
                                     config.suspicious_action == "block",
