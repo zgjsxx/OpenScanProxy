@@ -47,7 +47,7 @@ bool test_category_whitelist() {
 }
 
 bool test_domain_category_dataset() {
-  const std::string path = "./test_domain_categories.csv";
+  const std::string path = "./build/test_domain_categories.csv";
   {
     std::ofstream ofs(path, std::ios::trunc);
     ofs << "example.org,news\n";

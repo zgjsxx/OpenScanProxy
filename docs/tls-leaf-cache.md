@@ -22,7 +22,7 @@ OpenScanProxy 现在支持 TLS MITM 叶子证书的双层缓存：
 
 ## 配置项
 
-在 [configs/config.json](/D:/git_proj/OpenScanProxy/configs/config.json) 中新增了两个配置项：
+在 [configs/config.json](../configs/config.json) 中新增了两个配置项：
 
 ```json
 {

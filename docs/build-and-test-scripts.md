@@ -4,8 +4,8 @@
 
 项目根目录新增了两个辅助脚本：
 
-- [build.sh](/D:/git_proj/OpenScanProxy/build.sh)
-- [test.sh](/D:/git_proj/OpenScanProxy/test.sh)
+- [build.sh](../build.sh)
+- [test.sh](../test.sh)
 
 目标是把常见的 CMake 配置、编译和测试流程收敛成更稳定的命令入口，减少每次手工输入长命令的成本。
 
@@ -226,6 +226,89 @@ ctest --test-dir build
 
 因此推荐统一通过 `test.sh` 或在构建目录内直接执行 `ctest`。
 
+### Ubuntu 20.04.6 LTS 上的 CMake 版本问题
+
+在 Ubuntu 20.04.6 LTS 自带的较老 CMake / CTest 环境中，已经出现过下面这种现象：
+
+- `build/CTestTestfile.cmake` 已经正常生成
+- 在 `build/` 目录内执行 `ctest` 可以正确识别测试
+- 但直接执行：
+
+```bash
+ctest --test-dir build
+```
+
+却仍然显示：
+
+```text
+No tests were found!!!
+```
+
+如果你确认遇到的是系统自带旧版 CMake/CTest 的兼容性问题，建议直接升级到 Kitware 官方 APT 源提供的新版 CMake。
+
+#### 1. 安装基础依赖
+
+```bash
+sudo apt update
+sudo apt install -y ca-certificates gpg wget
+```
+
+#### 2. 导入 Kitware 仓库签名 key
+
+```bash
+test -f /usr/share/doc/kitware-archive-keyring/copyright || \
+wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | \
+gpg --dearmor - | \
+sudo tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null
+```
+
+#### 3. 添加 Ubuntu 20.04 的 Kitware 源
+
+```bash
+echo 'deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ focal main' | \
+sudo tee /etc/apt/sources.list.d/kitware.list >/dev/null
+```
+
+Kitware 官方页面给出的 Ubuntu 20.04 仓库名就是：
+
+```text
+focal main
+```
+
+#### 4. 更新索引并安装 keyring
+
+```bash
+sudo apt update
+sudo apt install -y kitware-archive-keyring
+```
+
+#### 5. 安装新版 CMake
+
+```bash
+sudo apt install -y cmake
+```
+
+#### 6. 确认版本
+
+```bash
+cmake --version
+ctest --version
+cpack --version
+```
+
+如果升级后 `ctest --test-dir build` 行为恢复正常，可以继续使用该写法；否则仍然建议优先使用：
+
+```bash
+./test.sh
+```
+
+或者：
+
+```bash
+cd build
+ctest --output-on-failure
+```
+
 ## 当前测试目标
 
 在 `BUILD_TESTING=ON` 时，目前会构建并注册以下测试：
@@ -236,9 +319,9 @@ ctest --test-dir build
 
 ## 相关文件
 
-- [CMakeLists.txt](/D:/git_proj/OpenScanProxy/CMakeLists.txt)
-- [build.sh](/D:/git_proj/OpenScanProxy/build.sh)
-- [test.sh](/D:/git_proj/OpenScanProxy/test.sh)
-- [tests/http_message_test.cpp](/D:/git_proj/OpenScanProxy/tests/http_message_test.cpp)
-- [tests/http_protocol_test.cpp](/D:/git_proj/OpenScanProxy/tests/http_protocol_test.cpp)
-- [tests/policy_test.cpp](/D:/git_proj/OpenScanProxy/tests/policy_test.cpp)
+- [CMakeLists.txt](../CMakeLists.txt)
+- [build.sh](../build.sh)
+- [test.sh](../test.sh)
+- [tests/http_message_test.cpp](../tests/http_message_test.cpp)
+- [tests/http_protocol_test.cpp](../tests/http_protocol_test.cpp)
+- [tests/policy_test.cpp](../tests/policy_test.cpp)
