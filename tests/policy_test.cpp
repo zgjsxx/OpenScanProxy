@@ -16,6 +16,9 @@ bool expect(bool v, const std::string& msg) {
   return v;
 }
 
+// Verifies the built-in URL classifier maps representative domains and paths
+// into the expected coarse categories. This is the foundation for category-
+// based allow/block rules, so we keep a small but high-signal sample here.
 bool test_url_classification() {
   return expect(openscanproxy::policy::classify_url("www.youtube.com", "/watch?v=1") == "video", "classify video") &&
          expect(openscanproxy::policy::classify_url("api.github.com", "/repos") == "developer", "classify developer") &&
@@ -24,6 +27,9 @@ bool test_url_classification() {
          expect(openscanproxy::policy::classify_url("example.com", "/docs") == "other", "classify other");
 }
 
+// Verifies a category blacklist overrides the default allow posture. The
+// engine should classify the URL, match the blocked category, and record the
+// correct matched_type so block pages and audits can explain the decision.
 bool test_category_blacklist() {
   PolicyConfig cfg;
   cfg.default_access_action = AccessAction::Allow;
@@ -35,6 +41,9 @@ bool test_category_blacklist() {
          expect(r.url_category == "gambling", "category value");
 }
 
+// Verifies a category whitelist overrides the default block posture. This
+// covers the inverse policy model where only explicitly approved categories are
+// allowed and everything else remains blocked by default.
 bool test_category_whitelist() {
   PolicyConfig cfg;
   cfg.default_access_action = AccessAction::Block;
@@ -46,6 +55,9 @@ bool test_category_whitelist() {
          expect(r.url_category == "developer", "category value");
 }
 
+// Verifies external domain-category CSV data can be loaded and then matched by
+// exact host, parent domain, and deeper subdomain suffix. This protects the
+// data-driven classification path that admins can extend without recompiling.
 bool test_domain_category_dataset() {
   const std::string path = "./build/test_domain_categories.csv";
   {
@@ -64,6 +76,9 @@ bool test_domain_category_dataset() {
          expect(c2 == "shopping", "classify by exact domain") && expect(c3 == "shopping", "classify by subdomain suffix");
 }
 
+// Verifies per-user access rules only apply to the intended users and that
+// each rule can independently allow or block based on category matches. This
+// is the core behavior behind user-scoped policy rules in the admin UI.
 bool test_user_scoped_access_rules() {
   PolicyConfig cfg;
   cfg.default_access_action = AccessAction::Allow;

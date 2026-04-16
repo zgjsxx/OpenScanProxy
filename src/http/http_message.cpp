@@ -2,8 +2,8 @@
 
 #include "openscanproxy/core/util.hpp"
 
-#include <charconv>
 #include <algorithm>
+#include <charconv>
 #include <sstream>
 
 namespace openscanproxy::http {
@@ -26,30 +26,93 @@ bool parse_headers_block(const std::string& block, Headers& headers) {
   return true;
 }
 
+std::vector<std::string> split_header_tokens(const std::string& value) {
+  std::vector<std::string> out;
+  std::size_t start = 0;
+  while (start <= value.size()) {
+    auto comma = value.find(',', start);
+    auto token = core::trim(value.substr(start, comma == std::string::npos ? std::string::npos : comma - start));
+    if (!token.empty()) out.push_back(token);
+    if (comma == std::string::npos) break;
+    start = comma + 1;
+  }
+  return out;
+}
+
 bool parse_content_length(const Headers& headers, std::size_t& out) {
-  auto raw = header_get(headers, "Content-Length");
-  if (raw.empty()) {
+  auto values = header_get_all(headers, "Content-Length");
+  if (values.empty()) {
     out = 0;
     return true;
   }
-  std::uint64_t v = 0;
-  auto first = raw.data();
-  auto last = raw.data() + raw.size();
-  auto [ptr, ec] = std::from_chars(first, last, v);
-  if (ec != std::errc() || ptr != last) return false;
-  out = static_cast<std::size_t>(v);
+
+  bool have_value = false;
+  std::uint64_t parsed_value = 0;
+  for (const auto& raw_value : values) {
+    auto tokens = split_header_tokens(raw_value);
+    if (tokens.empty()) return false;
+    for (const auto& token : tokens) {
+      std::uint64_t v = 0;
+      auto first = token.data();
+      auto last = token.data() + token.size();
+      auto [ptr, ec] = std::from_chars(first, last, v);
+      if (ec != std::errc() || ptr != last) return false;
+      if (have_value && parsed_value != v) return false;
+      parsed_value = v;
+      have_value = true;
+    }
+  }
+
+  if (!have_value) return false;
+  out = static_cast<std::size_t>(parsed_value);
   return true;
 }
 
-bool is_chunked(const Headers& headers) {
-  auto te = core::to_lower(header_get(headers, "Transfer-Encoding"));
-  return te.find("chunked") != std::string::npos;
+enum class TransferEncodingMode {
+  None,
+  Chunked,
+};
+
+bool parse_transfer_encoding_mode(const Headers& headers, TransferEncodingMode& mode) {
+  auto values = header_get_all(headers, "Transfer-Encoding");
+  if (values.empty()) {
+    mode = TransferEncodingMode::None;
+    return true;
+  }
+
+  std::vector<std::string> codings;
+  for (const auto& value : values) {
+    auto tokens = split_header_tokens(core::to_lower(value));
+    if (tokens.empty()) return false;
+    codings.insert(codings.end(), tokens.begin(), tokens.end());
+  }
+
+  bool saw_chunked = false;
+  for (std::size_t i = 0; i < codings.size(); ++i) {
+    const auto& coding = codings[i];
+    if (coding == "chunked") {
+      if (saw_chunked || i + 1 != codings.size()) return false;
+      saw_chunked = true;
+      continue;
+    }
+
+    // The current parser only supports fixed-length bodies and final chunked
+    // transfer-coding. Any other transfer-coding must be rejected instead of
+    // being interpreted ambiguously.
+    return false;
+  }
+
+  mode = saw_chunked ? TransferEncodingMode::Chunked : TransferEncodingMode::None;
+  return true;
 }
 
 bool parse_message_body(const std::string& raw, std::size_t body_start, const Headers& headers,
                         std::vector<std::uint8_t>& body, std::size_t* consumed) {
   body.clear();
-  if (is_chunked(headers)) {
+  TransferEncodingMode transfer_encoding_mode = TransferEncodingMode::None;
+  if (!parse_transfer_encoding_mode(headers, transfer_encoding_mode)) return false;
+
+  if (transfer_encoding_mode == TransferEncodingMode::Chunked) {
     std::vector<std::uint8_t> encoded(raw.begin() + static_cast<std::ptrdiff_t>(body_start), raw.end());
     if (!decode_chunked_body(encoded, body)) return false;
     if (consumed) *consumed = raw.size();
@@ -210,7 +273,9 @@ std::string serialize_request(const HttpRequest& req) {
   os << req.method << ' ' << req.uri << ' ' << req.version << "\r\n";
   for (const auto& [k, v] : req.headers) os << k << ": " << v << "\r\n";
   os << "\r\n";
-  if (is_chunked(req.headers)) {
+  TransferEncodingMode transfer_encoding_mode = TransferEncodingMode::None;
+  if (parse_transfer_encoding_mode(req.headers, transfer_encoding_mode) &&
+      transfer_encoding_mode == TransferEncodingMode::Chunked) {
     auto encoded = encode_chunked_body(req.body);
     os.write(reinterpret_cast<const char*>(encoded.data()), static_cast<std::streamsize>(encoded.size()));
   } else {
@@ -224,7 +289,9 @@ std::string serialize_response(const HttpResponse& resp) {
   os << resp.version << ' ' << resp.status << ' ' << resp.reason << "\r\n";
   for (const auto& [k, v] : resp.headers) os << k << ": " << v << "\r\n";
   os << "\r\n";
-  if (is_chunked(resp.headers)) {
+  TransferEncodingMode transfer_encoding_mode = TransferEncodingMode::None;
+  if (parse_transfer_encoding_mode(resp.headers, transfer_encoding_mode) &&
+      transfer_encoding_mode == TransferEncodingMode::Chunked) {
     auto encoded = encode_chunked_body(resp.body);
     os.write(reinterpret_cast<const char*>(encoded.data()), static_cast<std::streamsize>(encoded.size()));
   } else {
