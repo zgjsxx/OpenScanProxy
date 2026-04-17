@@ -19,9 +19,16 @@ std::string trim(const std::string& s) {
 
 std::vector<std::string> split(const std::string& s, char delim) {
   std::vector<std::string> out;
-  std::stringstream ss(s);
-  std::string item;
-  while (std::getline(ss, item, delim)) out.push_back(item);
+  std::size_t start = 0;
+  while (start <= s.size()) {
+    const auto pos = s.find(delim, start);
+    if (pos == std::string::npos) {
+      out.push_back(s.substr(start));
+      break;
+    }
+    out.push_back(s.substr(start, pos - start));
+    start = pos + 1;
+  }
   return out;
 }
 
@@ -42,7 +49,11 @@ std::string now_iso8601() {
   auto now = std::chrono::system_clock::now();
   auto t = std::chrono::system_clock::to_time_t(now);
   std::tm tm{};
+#if defined(_WIN32)
+  gmtime_s(&tm, &t);
+#else
   gmtime_r(&t, &tm);
+#endif
   char buf[32];
   strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
   return buf;
@@ -78,3 +89,5 @@ std::map<std::string, std::string> parse_simple_json_object(const std::string& t
 }
 
 }  // namespace openscanproxy::core
+
+

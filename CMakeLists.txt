@@ -57,10 +57,47 @@ if(BUILD_TESTING)
   target_include_directories(http_protocol_test PRIVATE include)
   target_link_libraries(http_protocol_test PRIVATE OpenSSL::Crypto)
 
+  add_executable(config_test
+    tests/config_test.cpp
+    src/core/util.cpp
+    src/policy/policy.cpp
+    src/config/config.cpp
+  )
+  target_include_directories(config_test PRIVATE include)
+  target_link_libraries(config_test PRIVATE OpenSSL::Crypto)
+
+  add_executable(stats_test
+    tests/stats_test.cpp
+    src/stats/stats.cpp
+  )
+  target_include_directories(stats_test PRIVATE include)
+
+  add_executable(util_test
+    tests/util_test.cpp
+    src/core/util.cpp
+  )
+  target_include_directories(util_test PRIVATE include)
+  target_link_libraries(util_test PRIVATE OpenSSL::Crypto)
+
+  add_executable(extractor_test
+    tests/extractor_test.cpp
+    src/core/util.cpp
+    src/http/http_message.cpp
+    src/extractor/extractor.cpp
+  )
+  target_include_directories(extractor_test PRIVATE include)
+  target_link_libraries(extractor_test PRIVATE OpenSSL::Crypto)
+
   add_test(NAME http_message_test COMMAND http_message_test)
   add_test(NAME http_protocol_test COMMAND http_protocol_test)
   add_test(NAME policy_test COMMAND policy_test)
-  set_tests_properties(http_message_test http_protocol_test policy_test PROPERTIES
+  add_test(NAME config_test COMMAND config_test)
+  add_test(NAME stats_test COMMAND stats_test)
+  add_test(NAME util_test COMMAND util_test)
+  add_test(NAME extractor_test COMMAND extractor_test)
+  set_tests_properties(http_message_test http_protocol_test policy_test config_test stats_test util_test extractor_test PROPERTIES
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   )
 endif()
+
+

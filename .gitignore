@@ -3,3 +3,7 @@ logs/
 certs/
 build-codex
 build-auth-portal-check
+build-vs/
+web/dist/
+web/node_modules/
+web/pnpm-lock.yaml

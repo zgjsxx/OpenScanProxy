@@ -3,6 +3,7 @@
 #include "openscanproxy/core/util.hpp"
 
 #include <fstream>
+#include <optional>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
@@ -19,7 +20,7 @@ std::string read_all(const std::string& path) {
 }
 
 std::vector<std::string> parse_string_array(const std::string& text, const std::string& key) {
-  std::regex arr("\\\"" + key + "\\\"\\s*:\\s*\\[(.*?)\\]", std::regex::icase);
+  std::regex arr("\\\"" + key + "\\\"\\s*:\\s*\\[([\\s\\S]*?)\\]", std::regex::icase);
   std::smatch m;
   if (!std::regex_search(text, m, arr)) return {};
   std::vector<std::string> out;
@@ -28,16 +29,94 @@ std::vector<std::string> parse_string_array(const std::string& text, const std::
   return out;
 }
 
+std::optional<std::string> extract_array_body(const std::string& text, const std::string& key) {
+  const std::string needle = "\"" + key + "\"";
+  const auto key_pos = text.find(needle);
+  if (key_pos == std::string::npos) return std::nullopt;
+
+  const auto array_start = text.find('[', key_pos + needle.size());
+  if (array_start == std::string::npos) return std::nullopt;
+
+  bool in_string = false;
+  bool escaped = false;
+  int depth = 0;
+  for (std::size_t i = array_start; i < text.size(); ++i) {
+    const char ch = text[i];
+    if (in_string) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch == '\\') {
+        escaped = true;
+      } else if (ch == '"') {
+        in_string = false;
+      }
+      continue;
+    }
+
+    if (ch == '"') {
+      in_string = true;
+      continue;
+    }
+    if (ch == '[') {
+      ++depth;
+      continue;
+    }
+    if (ch == ']') {
+      --depth;
+      if (depth == 0) return text.substr(array_start + 1, i - array_start - 1);
+    }
+  }
+
+  return std::nullopt;
+}
+
+std::vector<std::string> split_top_level_objects(const std::string& text) {
+  std::vector<std::string> objects;
+  bool in_string = false;
+  bool escaped = false;
+  int depth = 0;
+  std::size_t object_start = std::string::npos;
+
+  for (std::size_t i = 0; i < text.size(); ++i) {
+    const char ch = text[i];
+    if (in_string) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch == '\\') {
+        escaped = true;
+      } else if (ch == '"') {
+        in_string = false;
+      }
+      continue;
+    }
+
+    if (ch == '"') {
+      in_string = true;
+      continue;
+    }
+    if (ch == '{') {
+      if (depth == 0) object_start = i;
+      ++depth;
+      continue;
+    }
+    if (ch == '}') {
+      --depth;
+      if (depth == 0 && object_start != std::string::npos) {
+        objects.push_back(text.substr(object_start, i - object_start + 1));
+        object_start = std::string::npos;
+      }
+    }
+  }
+
+  return objects;
+}
+
 std::vector<policy::AccessRule> parse_access_rules(const std::string& text) {
   std::vector<policy::AccessRule> rules;
-  std::regex arr("\\\"access_rules\\\"\\s*:\\s*\\[(.*)\\]", std::regex::icase);
-  std::smatch arr_match;
-  if (!std::regex_search(text, arr_match, arr)) return rules;
-  const auto body = arr_match[1].str();
+  const auto body = extract_array_body(text, "access_rules");
+  if (!body) return rules;
 
-  std::regex obj("\\{([^\\{\\}]*)\\}");
-  for (std::sregex_iterator it(body.begin(), body.end(), obj), end; it != end; ++it) {
-    const auto item = (*it)[0].str();
+  for (const auto& item : split_top_level_objects(*body)) {
     auto kv = core::parse_simple_json_object(item);
     policy::AccessRule rule;
     if (kv.count("name")) rule.name = kv.at("name");
