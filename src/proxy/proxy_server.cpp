@@ -205,6 +205,18 @@ bool should_redirect_to_portal_for_request(const http::Headers& headers) {
   auto fetch_mode = lower(http::header_get(headers, "Sec-Fetch-Mode"));
   auto fetch_dest = lower(http::header_get(headers, "Sec-Fetch-Dest"));
   if (fetch_mode == "navigate" || fetch_dest == "document") return true;
+
+  // Some plain HTTP top-level navigations do not carry Sec-Fetch-* headers.
+  // Fall back to classic browser navigation signals so direct visits like
+  // `http://example.com/` still enter the portal flow.
+  auto upgrade_insecure_requests = core::trim(http::header_get(headers, "Upgrade-Insecure-Requests"));
+  auto accept = lower(http::header_get(headers, "Accept"));
+  if (upgrade_insecure_requests == "1" &&
+      (accept.empty() || accept.find("text/html") != std::string::npos ||
+       accept.find("application/xhtml+xml") != std::string::npos)) {
+    return true;
+  }
+
   return false;
 }
 
