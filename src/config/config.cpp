@@ -185,6 +185,7 @@ AppConfig ConfigLoader::load_from_file(const std::string& path) {
   GET_S("proxy_auth_portal_listen_host", proxy_auth_portal_listen_host);
   GET_U16("proxy_auth_portal_listen_port", proxy_auth_portal_listen_port);
   GET_S("proxy_auth_cookie_name", proxy_auth_cookie_name);
+  GET_S("proxy_auth_insecure_cookie_name", proxy_auth_insecure_cookie_name);
   GET_S("proxy_auth_portal_cookie_name", proxy_auth_portal_cookie_name);
   GET_S("proxy_auth_portal_session_file", proxy_auth_portal_session_file);
   GET_S("proxy_auth_client_cache_file", proxy_auth_client_cache_file);
@@ -213,6 +214,7 @@ AppConfig ConfigLoader::load_from_file(const std::string& path) {
   if (cfg.proxy_auth_portal_session_ttl_sec == 0) cfg.proxy_auth_portal_session_ttl_sec = 3600;
   if (cfg.proxy_auth_token_ttl_sec == 0) cfg.proxy_auth_token_ttl_sec = 120;
   if (cfg.proxy_auth_cookie_name.empty()) cfg.proxy_auth_cookie_name = "osp_proxy_auth";
+  if (cfg.proxy_auth_insecure_cookie_name.empty()) cfg.proxy_auth_insecure_cookie_name = "osp_proxy_auth_insecure";
   if (cfg.proxy_auth_portal_cookie_name.empty()) cfg.proxy_auth_portal_cookie_name = "osp_portal_session";
   if (cfg.proxy_auth_portal_session_file.empty()) cfg.proxy_auth_portal_session_file = "./configs/portal_sessions.json";
   if (cfg.proxy_auth_client_cache_file.empty()) cfg.proxy_auth_client_cache_file = "./configs/portal_client_auth_cache.json";

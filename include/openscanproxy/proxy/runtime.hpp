@@ -630,6 +630,9 @@ struct Runtime {
 
   bool portal_auth_enabled() const { return config.enable_proxy_auth && config.proxy_auth_mode != "basic"; }
   bool proxy_basic_enabled() const { return config.enable_proxy_auth && config.proxy_auth_mode != "portal"; }
+  std::string proxy_auth_cookie_name_for_scheme(bool secure_cookie) const {
+    return secure_cookie ? config.proxy_auth_cookie_name : config.proxy_auth_insecure_cookie_name;
+  }
 
   std::string build_proxy_auth_cookie_value(const std::string& username, const std::string& host) const {
     if (username.empty() || host.empty()) return "";

@@ -324,7 +324,7 @@ std::string make_domain_cookie_response(const proxy::Runtime& runtime, const std
   auto cookie_value = runtime.build_proxy_auth_cookie_value(username, host);
   auto location = strip_auth_token_from_url(absolute_url);
   auto max_age = std::to_string(runtime.config.proxy_auth_portal_session_ttl_sec);
-  auto cookie = "Set-Cookie: " + runtime.config.proxy_auth_cookie_name + "=" + cookie_value +
+  auto cookie = "Set-Cookie: " + runtime.proxy_auth_cookie_name_for_scheme(secure_cookie) + "=" + cookie_value +
                 "; HttpOnly; Path=/; Max-Age=" + max_age + (secure_cookie ? "; Secure" : "") + "\r\n";
   return make_redirect_response(location, cookie);
 }
@@ -824,7 +824,7 @@ void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host,
     if (runtime_.config.enable_proxy_auth) {
       auto cookies = parse_cookie_header(http::header_get(req.headers, "Cookie"));
       if (resolved_user.empty()) {
-        auto cookie_it = cookies.find(runtime_.config.proxy_auth_cookie_name);
+        auto cookie_it = cookies.find(runtime_.proxy_auth_cookie_name_for_scheme(true));
         if (cookie_it != cookies.end()) {
           resolved_user = runtime_.validate_proxy_auth_cookie(cookie_it->second, host);
           if (!resolved_user.empty()) {
@@ -1073,7 +1073,7 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
   if (runtime_.config.enable_proxy_auth && !portal_target) {
     auto cookies = parse_cookie_header(http::header_get(req.headers, "Cookie"));
     if (resolved_user.empty()) {
-      auto cookie_it = cookies.find(runtime_.config.proxy_auth_cookie_name);
+      auto cookie_it = cookies.find(runtime_.proxy_auth_cookie_name_for_scheme(false));
       if (cookie_it != cookies.end()) {
         resolved_user = runtime_.validate_proxy_auth_cookie(cookie_it->second, host);
         if (!resolved_user.empty()) {

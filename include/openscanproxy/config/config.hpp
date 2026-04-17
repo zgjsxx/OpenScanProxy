@@ -63,6 +63,7 @@ struct AppConfig {
   std::string proxy_auth_portal_listen_host{"127.0.0.1"};
   uint16_t proxy_auth_portal_listen_port{9091};
   std::string proxy_auth_cookie_name{"osp_proxy_auth"};
+  std::string proxy_auth_insecure_cookie_name{"osp_proxy_auth_insecure"};
   std::string proxy_auth_portal_cookie_name{"osp_portal_session"};
   std::string proxy_auth_portal_session_file{"./configs/portal_sessions.json"};
   std::string proxy_auth_client_cache_file{"./configs/portal_client_auth_cache.json"};
