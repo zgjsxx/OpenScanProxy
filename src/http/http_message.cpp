@@ -96,9 +96,8 @@ bool parse_transfer_encoding_mode(const Headers& headers, TransferEncodingMode& 
       continue;
     }
 
-    // The current parser only supports fixed-length bodies and final chunked
-    // transfer-coding. Any other transfer-coding must be rejected instead of
-    // being interpreted ambiguously.
+    // 当前解析器仅支持固定长度正文和最终分块传输编码。
+    // 其他传输编码必须被拒绝，而非做模糊解读。
     return false;
   }
 

@@ -76,7 +76,7 @@ std::string json_escape(const std::string& in) {
 }
 
 std::map<std::string, std::string> parse_simple_json_object(const std::string& text) {
-  // Minimal parser for flat key->(string|number|bool) JSON object. TODO: replace with robust parser if schema grows.
+  // 最小化解析器，用于扁平 key->(string|number|bool) JSON 对象。TODO: 如结构变复杂，替换为健壮的解析器。
   std::map<std::string, std::string> out;
   std::regex kv_regex("\\\"([^\\\"]+)\\\"\\s*:\\s*(\\\"([^\\\"]*)\\\"|true|false|-?[0-9]+)");
   for (std::sregex_iterator it(text.begin(), text.end(), kv_regex), end; it != end; ++it) {

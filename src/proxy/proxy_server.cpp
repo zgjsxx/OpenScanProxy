@@ -201,23 +201,28 @@ bool browser_like_request(const http::Headers& headers) {
 }
 
 bool should_redirect_to_portal_for_request(const http::Headers& headers) {
-  // Interactive portal redirects should only happen for top-level navigations.
+  // 安全默认值：除非明确识别为子资源/非导航请求，否则都允许进入
+  // Portal redirect。这样普通页面访问不需要依赖浏览器一定带上某些
+  // Sec-Fetch-* 头，而明确的脚本、样式、图片、XHR/CORS 请求仍然不会
+  // 被 302 到 Portal。
   auto fetch_mode = lower(http::header_get(headers, "Sec-Fetch-Mode"));
   auto fetch_dest = lower(http::header_get(headers, "Sec-Fetch-Dest"));
-  if (fetch_mode == "navigate" || fetch_dest == "document") return true;
 
-  // Some plain HTTP top-level navigations do not carry Sec-Fetch-* headers.
-  // Fall back to classic browser navigation signals so direct visits like
-  // `http://example.com/` still enter the portal flow.
-  auto upgrade_insecure_requests = core::trim(http::header_get(headers, "Upgrade-Insecure-Requests"));
-  auto accept = lower(http::header_get(headers, "Accept"));
-  if (upgrade_insecure_requests == "1" &&
-      (accept.empty() || accept.find("text/html") != std::string::npos ||
-       accept.find("application/xhtml+xml") != std::string::npos)) {
-    return true;
+  if (fetch_mode == "cors" || fetch_mode == "no-cors" || fetch_mode == "same-origin" ||
+      fetch_mode == "websocket") {
+    return false;
   }
 
-  return false;
+  if (fetch_dest == "empty" || fetch_dest == "script" || fetch_dest == "style" ||
+      fetch_dest == "image" || fetch_dest == "font" || fetch_dest == "audio" ||
+      fetch_dest == "video" || fetch_dest == "track" || fetch_dest == "manifest" ||
+      fetch_dest == "worker" || fetch_dest == "sharedworker" ||
+      fetch_dest == "serviceworker" || fetch_dest == "report" ||
+      fetch_dest == "embed" || fetch_dest == "object") {
+    return false;
+  }
+
+  return true;
 }
 
 bool should_allow_client_ip_auth_for_request(const http::Headers& headers) {
@@ -810,6 +815,9 @@ void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host,
     http::HttpRequest req;
     if (!http::parse_request(raw_req, req)) break;
     auto resolved_user = user;
+    // allow_portal_redirect: 是否允许将当前请求重定向到 Portal 登录页。
+    // 仅对顶层导航请求（Sec-Fetch-Mode=navigate 或 Sec-Fetch-Dest=document）为 true，
+    // 避免对子资源请求（脚本/图片/CORS 等）执行交互式重定向导致页面加载中断。
     const auto allow_portal_redirect = should_redirect_to_portal_for_request(req.headers);
     const auto allow_client_ip_auth = should_allow_client_ip_auth_for_request(req.headers);
     const auto absolute_url = absolute_request_url(host, req.uri, true);
@@ -1055,6 +1063,9 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
   auto [host, port] = split_host_port(host_h, 80);
   auto resolved_user = user;
   const auto secure_cookie = false;
+  // allow_portal_redirect: 是否允许将当前请求重定向到 Portal 登录页。
+  // 仅对顶层导航请求（Sec-Fetch-Mode=navigate 或 Sec-Fetch-Dest=document）为 true，
+  // 避免对子资源请求（脚本/图片/CORS 等）执行交互式重定向导致页面加载中断。
   const auto allow_portal_redirect = should_redirect_to_portal_for_request(req.headers);
   const auto allow_client_ip_auth = should_allow_client_ip_auth_for_request(req.headers);
   const auto absolute_url = absolute_request_url(host_h, req.uri, false);

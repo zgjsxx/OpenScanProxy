@@ -333,7 +333,7 @@ SSL_CTX* TLSMitmEngine::create_server_ctx_for_host(const std::string& host) cons
 }
 
 bool TLSMitmEngine::issue_leaf_for_host(const std::string&, const std::string&, const std::string&) {
-  // TODO: implement real per-host dynamic leaf cert issuance and cache.
+  // TODO: 实现真正的按主机动态叶子证书签发与缓存。
   return true;
 }
 
