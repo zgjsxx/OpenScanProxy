@@ -14,6 +14,7 @@ struct HttpRequest {
   std::string uri;
   std::string version{"HTTP/1.1"};
   Headers headers;
+  Headers trailers;  // chunked 编码的 trailer 头部
   std::vector<uint8_t> body;
 };
 
@@ -22,6 +23,7 @@ struct HttpResponse {
   int status{200};
   std::string reason{"OK"};
   Headers headers;
+  Headers trailers;  // chunked 编码的 trailer 头部
   std::vector<uint8_t> body;
 };
 
@@ -37,7 +39,9 @@ bool parse_response(const std::string& raw, HttpResponse& resp);
 bool parse_request(const std::string& raw, HttpRequest& req, std::size_t* consumed);
 bool parse_response(const std::string& raw, HttpResponse& resp, std::size_t* consumed);
 bool decode_chunked_body(const std::vector<uint8_t>& encoded, std::vector<uint8_t>& decoded);
+bool decode_chunked_body(const std::vector<uint8_t>& encoded, std::vector<uint8_t>& decoded, Headers& trailers);
 std::vector<uint8_t> encode_chunked_body(const std::vector<uint8_t>& body, std::size_t chunk_size = 4096);
+std::vector<uint8_t> encode_chunked_body(const std::vector<uint8_t>& body, const Headers& trailers, std::size_t chunk_size = 4096);
 bool message_should_close(const std::string& version, const Headers& headers);
 
 }  // namespace openscanproxy::http

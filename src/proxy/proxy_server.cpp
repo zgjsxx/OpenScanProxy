@@ -443,6 +443,20 @@ bool has_chunked_encoding(const http::Headers& headers) {
   return te.find("chunked") != std::string::npos;
 }
 
+// 查找 chunked 消息（含 trailer）的结束位置。
+// 搜索 "\r\n0\r\n" 定位终止块，然后从该位置搜索 "\r\n\r\n" 匹配 trailer 段终止符。
+// 无 trailer 时匹配 "\r\n0\r\n\r\n"（与原逻辑一致），有 trailer 时匹配 "\r\n0\r\n<header>\r\n\r\n"。
+std::size_t find_chunked_message_end(const std::string& buffer, std::size_t from_pos) {
+  auto zero_pos = buffer.find("\r\n0\r\n", from_pos);
+  if (zero_pos == std::string::npos) return std::string::npos;
+  // 从 zero_pos+3 开始搜索 "\r\n\r\n":
+  // - 无 trailer: zero_pos+3 处即是零块 CRLF + 空行 CRLF 组成的 "\r\n\r\n"
+  // - 有 trailer: 在 trailer 头部之后的 "\r\n\r\n" 处匹配
+  auto trailer_end = buffer.find("\r\n\r\n", zero_pos + 3);
+  if (trailer_end == std::string::npos) return std::string::npos;
+  return trailer_end + 4;
+}
+
 int base64_value(char c) {
   if (c >= 'A' && c <= 'Z') return c - 'A';
   if (c >= 'a' && c <= 'z') return c - 'a' + 26;
@@ -553,13 +567,12 @@ bool ssl_read_http_message(SSL* ssl, std::string& pending, std::string& raw_mess
   if (!chunked && !parse_content_length_header(headers, content_length)) return false;
 
   if (chunked) {
-    while (pending.find("\r\n0\r\n\r\n", header_end + 4) == std::string::npos) {
+    while (find_chunked_message_end(pending, header_end + 4) == std::string::npos) {
       auto n = SSL_read(ssl, buf, sizeof(buf));
       if (n <= 0) return false;
       pending.append(buf, static_cast<std::size_t>(n));
     }
-    auto msg_end = pending.find("\r\n0\r\n\r\n", header_end + 4);
-    msg_end += 7;
+    auto msg_end = find_chunked_message_end(pending, header_end + 4);
     raw_message = pending.substr(0, msg_end);
     pending.erase(0, msg_end);
     return true;
@@ -674,7 +687,7 @@ void ProxyServer::handle_client(int cfd, const std::string& client_addr) {
     if (!is_chunked && !parse_content_length_header(headers, content_length)) break;
 
     if (is_chunked) {
-      while (pending.find("\r\n0\r\n\r\n", header_end + 4) == std::string::npos) {
+      while (find_chunked_message_end(pending, header_end + 4) == std::string::npos) {
         auto n = recv(cfd, buf, sizeof(buf), 0);
         if (n <= 0) break;
         pending.append(buf, static_cast<std::size_t>(n));
@@ -690,6 +703,10 @@ void ProxyServer::handle_client(int cfd, const std::string& client_addr) {
 
     std::size_t consumed = pending.size();
     if (!is_chunked) consumed = header_end + 4 + content_length;
+    else {
+      auto chunked_end = find_chunked_message_end(pending, header_end + 4);
+      if (chunked_end != std::string::npos) consumed = chunked_end;
+    }
     auto raw = pending.substr(0, consumed);
     pending.erase(0, consumed);
 
@@ -1257,7 +1274,7 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
 
     if (header_end != std::string::npos) {
       if (response_chunked) {
-        if (upstream_for_parse.find("\r\n0\r\n\r\n", header_end + 4) != std::string::npos) should_stop = true;
+        if (find_chunked_message_end(upstream_for_parse, header_end + 4) != std::string::npos) should_stop = true;
       } else if (!response_close_delimited) {
         if (upstream_for_parse.size() >= header_end + 4 + response_content_length) should_stop = true;
       }

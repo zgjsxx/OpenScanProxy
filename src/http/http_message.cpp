@@ -106,14 +106,15 @@ bool parse_transfer_encoding_mode(const Headers& headers, TransferEncodingMode& 
 }
 
 bool parse_message_body(const std::string& raw, std::size_t body_start, const Headers& headers,
-                        std::vector<std::uint8_t>& body, std::size_t* consumed) {
+                        std::vector<std::uint8_t>& body, Headers& trailers, std::size_t* consumed) {
   body.clear();
+  trailers.clear();
   TransferEncodingMode transfer_encoding_mode = TransferEncodingMode::None;
   if (!parse_transfer_encoding_mode(headers, transfer_encoding_mode)) return false;
 
   if (transfer_encoding_mode == TransferEncodingMode::Chunked) {
     std::vector<std::uint8_t> encoded(raw.begin() + static_cast<std::ptrdiff_t>(body_start), raw.end());
-    if (!decode_chunked_body(encoded, body)) return false;
+    if (!decode_chunked_body(encoded, body, trailers)) return false;
     if (consumed) *consumed = raw.size();
     return true;
   }
@@ -176,7 +177,7 @@ bool parse_request(const std::string& raw, HttpRequest& req, std::size_t* consum
   auto headers_block = raw.substr(first_line_end + 2, header_end - (first_line_end + 2));
   if (!parse_headers_block(headers_block, req.headers)) return false;
 
-  return parse_message_body(raw, header_end + 4, req.headers, req.body, consumed);
+  return parse_message_body(raw, header_end + 4, req.headers, req.body, req.trailers, consumed);
 }
 
 bool parse_response(const std::string& raw, HttpResponse& resp) { return parse_response(raw, resp, nullptr); }
@@ -199,11 +200,12 @@ bool parse_response(const std::string& raw, HttpResponse& resp, std::size_t* con
   auto headers_block = raw.substr(first_line_end + 2, header_end - (first_line_end + 2));
   if (!parse_headers_block(headers_block, resp.headers)) return false;
 
-  return parse_message_body(raw, header_end + 4, resp.headers, resp.body, consumed);
+  return parse_message_body(raw, header_end + 4, resp.headers, resp.body, resp.trailers, consumed);
 }
 
-bool decode_chunked_body(const std::vector<uint8_t>& encoded, std::vector<uint8_t>& decoded) {
+bool decode_chunked_body(const std::vector<uint8_t>& encoded, std::vector<uint8_t>& decoded, Headers& trailers) {
   decoded.clear();
+  trailers.clear();
   std::size_t pos = 0;
   while (pos < encoded.size()) {
     auto line_end = std::string::npos;
@@ -231,8 +233,33 @@ bool decode_chunked_body(const std::vector<uint8_t>& encoded, std::vector<uint8_
 
     pos = line_end + 2;
     if (chunk_size == 0) {
-      if (pos + 2 > encoded.size()) return false;
-      return encoded[pos] == '\r' && encoded[pos + 1] == '\n';
+      // 读取 trailer 头部，直到遇到空行（仅 \r\n）
+      while (pos + 1 < encoded.size()) {
+        auto trailer_line_end = std::string::npos;
+        for (std::size_t i = pos; i + 1 < encoded.size(); ++i) {
+          if (encoded[i] == '\r' && encoded[i + 1] == '\n') {
+            trailer_line_end = i;
+            break;
+          }
+        }
+        if (trailer_line_end == std::string::npos) return false;
+
+        // 空行 → trailer 段结束
+        if (trailer_line_end == pos) {
+          pos += 2;
+          return true;
+        }
+
+        // 解析 trailer 头部行（格式: name: value）
+        std::string trailer_line(encoded.begin() + static_cast<std::ptrdiff_t>(pos),
+                                  encoded.begin() + static_cast<std::ptrdiff_t>(trailer_line_end));
+        auto colon = trailer_line.find(':');
+        if (colon == std::string::npos) return false;
+        trailers.emplace_back(core::trim(trailer_line.substr(0, colon)),
+                              core::trim(trailer_line.substr(colon + 1)));
+        pos = trailer_line_end + 2;
+      }
+      return false;
     }
 
     if (pos + chunk_size + 2 > encoded.size()) return false;
@@ -245,7 +272,31 @@ bool decode_chunked_body(const std::vector<uint8_t>& encoded, std::vector<uint8_
   return false;
 }
 
+bool decode_chunked_body(const std::vector<uint8_t>& encoded, std::vector<uint8_t>& decoded) {
+  Headers unused;
+  return decode_chunked_body(encoded, decoded, unused);
+}
+
+// RFC 7230 section 4.1.2: 禁止出现在 trailer 中的头部字段
+bool is_disallowed_trailer_field(const std::string& name) {
+  static const std::vector<std::string> disallowed = {
+    "transfer-encoding", "content-length", "host",
+    "connection", "keep-alive", "proxy-authenticate",
+    "proxy-authorization", "te", "trailer", "upgrade"
+  };
+  auto lower_name = core::to_lower(name);
+  for (const auto& d : disallowed) {
+    if (lower_name == d) return true;
+  }
+  return false;
+}
+
 std::vector<uint8_t> encode_chunked_body(const std::vector<uint8_t>& body, std::size_t chunk_size) {
+  Headers empty_trailers;
+  return encode_chunked_body(body, empty_trailers, chunk_size);
+}
+
+std::vector<uint8_t> encode_chunked_body(const std::vector<uint8_t>& body, const Headers& trailers, std::size_t chunk_size) {
   if (chunk_size == 0) chunk_size = 4096;
   std::vector<uint8_t> out;
 
@@ -262,8 +313,22 @@ std::vector<uint8_t> encode_chunked_body(const std::vector<uint8_t>& body, std::
     out.push_back('\n');
     pos += n;
   }
-  static constexpr char tail[] = "0\r\n\r\n";
-  out.insert(out.end(), tail, tail + sizeof(tail) - 1);
+  // 终止块: 0\r\n
+  out.push_back('0');
+  out.push_back('\r');
+  out.push_back('\n');
+  // Trailer 段: 跳过禁止字段后逐行写入，最后以空行 \r\n 结束
+  for (const auto& [k, v] : trailers) {
+    if (is_disallowed_trailer_field(k)) continue;
+    out.insert(out.end(), k.begin(), k.end());
+    out.push_back(':');
+    out.push_back(' ');
+    out.insert(out.end(), v.begin(), v.end());
+    out.push_back('\r');
+    out.push_back('\n');
+  }
+  out.push_back('\r');
+  out.push_back('\n');
   return out;
 }
 
@@ -275,7 +340,7 @@ std::string serialize_request(const HttpRequest& req) {
   TransferEncodingMode transfer_encoding_mode = TransferEncodingMode::None;
   if (parse_transfer_encoding_mode(req.headers, transfer_encoding_mode) &&
       transfer_encoding_mode == TransferEncodingMode::Chunked) {
-    auto encoded = encode_chunked_body(req.body);
+    auto encoded = encode_chunked_body(req.body, req.trailers);
     os.write(reinterpret_cast<const char*>(encoded.data()), static_cast<std::streamsize>(encoded.size()));
   } else {
     os.write(reinterpret_cast<const char*>(req.body.data()), static_cast<std::streamsize>(req.body.size()));
@@ -291,7 +356,7 @@ std::string serialize_response(const HttpResponse& resp) {
   TransferEncodingMode transfer_encoding_mode = TransferEncodingMode::None;
   if (parse_transfer_encoding_mode(resp.headers, transfer_encoding_mode) &&
       transfer_encoding_mode == TransferEncodingMode::Chunked) {
-    auto encoded = encode_chunked_body(resp.body);
+    auto encoded = encode_chunked_body(resp.body, resp.trailers);
     os.write(reinterpret_cast<const char*>(encoded.data()), static_cast<std::streamsize>(encoded.size()));
   } else {
     os.write(reinterpret_cast<const char*>(resp.body.data()), static_cast<std::streamsize>(resp.body.size()));

@@ -126,6 +126,102 @@ bool test_duplicate_headers_preserved_in_response() {
          expect(serialized.find("Warning: 199 misc\r\nWarning: 299 misc2\r\n") != std::string::npos, "serialize duplicate warning headers");
 }
 
+// 验证含 trailer 的 chunked 响应可以被正确解析，trailer 头部被保存在 resp.trailers 中。
+bool test_response_chunked_with_trailers() {
+  const std::string raw =
+      "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+      "4\r\nWiki\r\n5\r\npedia\r\n0\r\nX-Digest: sha256=abc\r\n\r\n";
+  HttpResponse resp;
+  std::size_t consumed = 0;
+  return expect(openscanproxy::http::parse_response(raw, resp, &consumed), "parse response chunked with trailers") &&
+         expect(std::string(resp.body.begin(), resp.body.end()) == "Wikipedia", "chunked body with trailers") &&
+         expect(resp.trailers.size() == 1, "one trailer header") &&
+         expect(resp.trailers[0].first == "X-Digest" && resp.trailers[0].second == "sha256=abc", "trailer content") &&
+         expect(consumed == raw.size(), "chunked with trailers consumed full response");
+}
+
+// 验证含多个 trailer 的 chunked 响应解析。
+bool test_response_chunked_with_multiple_trailers() {
+  const std::string raw =
+      "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+      "5\r\nhello\r\n0\r\nX-Digest: abc\r\nX-Status: ok\r\n\r\n";
+  HttpResponse resp;
+  std::size_t consumed = 0;
+  return expect(openscanproxy::http::parse_response(raw, resp, &consumed), "parse response with multiple trailers") &&
+         expect(std::string(resp.body.begin(), resp.body.end()) == "hello", "body with multiple trailers") &&
+         expect(resp.trailers.size() == 2, "two trailer headers") &&
+         expect(resp.trailers[0].first == "X-Digest" && resp.trailers[1].first == "X-Status", "trailer names");
+}
+
+// 验证含 trailer 的 chunked 请求可以被正确解析。
+bool test_request_chunked_with_trailers() {
+  const std::string raw =
+      "POST /upload HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n"
+      "5\r\nhello\r\n0\r\nX-Checksum: md5=xyz\r\n\r\n";
+  HttpRequest req;
+  std::size_t consumed = 0;
+  return expect(openscanproxy::http::parse_request(raw, req, &consumed), "parse request chunked with trailers") &&
+         expect(std::string(req.body.begin(), req.body.end()) == "hello", "request body with trailers") &&
+         expect(req.trailers.size() == 1, "request trailer count") &&
+         expect(req.trailers[0].first == "X-Checksum" && req.trailers[0].second == "md5=xyz", "request trailer content") &&
+         expect(consumed == raw.size(), "request chunked with trailers consumed");
+}
+
+// 验证含 trailer 的 chunked 编解码 roundtrip：编码后可解码回原始 body 和 trailers。
+bool test_chunked_encode_roundtrip_with_trailers() {
+  std::vector<uint8_t> body{'a', 'b', 'c', 'd', 'e', 'f'};
+  openscanproxy::http::Headers trailers;
+  trailers.emplace_back("X-Digest", "sha256=abc");
+  trailers.emplace_back("X-Status", "ok");
+  auto encoded = openscanproxy::http::encode_chunked_body(body, trailers, 2);
+  std::vector<uint8_t> decoded;
+  openscanproxy::http::Headers decoded_trailers;
+  return expect(openscanproxy::http::decode_chunked_body(encoded, decoded, decoded_trailers), "decode with trailers roundtrip") &&
+         expect(decoded == body, "roundtrip body matches") &&
+         expect(decoded_trailers.size() == 2, "roundtrip trailer count") &&
+         expect(decoded_trailers[0].first == "X-Digest" && decoded_trailers[0].second == "sha256=abc", "roundtrip trailer 1") &&
+         expect(decoded_trailers[1].first == "X-Status" && decoded_trailers[1].second == "ok", "roundtrip trailer 2");
+}
+
+// 验证序列化时 RFC 7230 禁止出现在 trailer 的头部（Transfer-Encoding、Content-Length 等）被跳过。
+bool test_disallowed_trailer_fields_stripped() {
+  std::vector<uint8_t> body{'h', 'e', 'l', 'l', 'o'};
+  openscanproxy::http::Headers trailers;
+  trailers.emplace_back("X-Valid", "yes");
+  trailers.emplace_back("Content-Length", "5");
+  trailers.emplace_back("Transfer-Encoding", "chunked");
+  trailers.emplace_back("Connection", "keep-alive");
+  trailers.emplace_back("X-Also-Valid", "ok");
+  auto encoded = openscanproxy::http::encode_chunked_body(body, trailers, 3);
+  std::vector<uint8_t> decoded;
+  openscanproxy::http::Headers decoded_trailers;
+  return expect(openscanproxy::http::decode_chunked_body(encoded, decoded, decoded_trailers), "decode disallowed stripped") &&
+         expect(decoded == body, "disallowed stripped body") &&
+         expect(decoded_trailers.size() == 2, "only allowed trailers remain") &&
+         expect(decoded_trailers[0].first == "X-Valid", "first allowed trailer") &&
+         expect(decoded_trailers[1].first == "X-Also-Valid", "second allowed trailer");
+}
+
+// 回归测试：无 trailer 的 chunked 消息行为与修改前完全一致。
+bool test_empty_trailers_no_change() {
+  const std::string raw =
+      "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n";
+  HttpResponse resp;
+  std::size_t consumed = 0;
+  return expect(openscanproxy::http::parse_response(raw, resp, &consumed), "parse response no trailers regression") &&
+         expect(std::string(resp.body.begin(), resp.body.end()) == "Wikipedia", "no trailers body regression") &&
+         expect(resp.trailers.empty(), "no trailers regression") &&
+         expect(consumed == raw.size(), "no trailers consumed regression");
+}
+
+// 验证无冒号的 trailer 行被拒绝（格式错误）。
+bool test_invalid_trailer_no_colon() {
+  const std::string raw =
+      "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n0\r\ninvalidline\r\n\r\n";
+  HttpResponse resp;
+  return expect(!openscanproxy::http::parse_response(raw, resp), "reject trailer without colon");
+}
+
 }  // namespace
 
 int main() {
@@ -139,6 +235,13 @@ int main() {
   ok = test_reject_conflicting_content_length_values() && ok;
   ok = test_reject_invalid_transfer_encoding_chain() && ok;
   ok = test_duplicate_headers_preserved_in_response() && ok;
+  ok = test_response_chunked_with_trailers() && ok;
+  ok = test_response_chunked_with_multiple_trailers() && ok;
+  ok = test_request_chunked_with_trailers() && ok;
+  ok = test_chunked_encode_roundtrip_with_trailers() && ok;
+  ok = test_disallowed_trailer_fields_stripped() && ok;
+  ok = test_empty_trailers_no_change() && ok;
+  ok = test_invalid_trailer_no_colon() && ok;
   if (ok) {
     std::cout << "All http_message tests passed\n";
     return 0;
