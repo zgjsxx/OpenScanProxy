@@ -187,9 +187,22 @@ struct TestProxy {
   std::unique_ptr<Runtime> runtime;
   std::unique_ptr<ProxyServer> server;
   std::thread proxy_thread;
-  int proxy_port = 18080;
-  int upstream_port = 18081;
+  int proxy_port = 0;
+  int upstream_port = 0;
   bool started = false;
+
+  // 全局端口偏移，每个 TestProxy 实例使用不同端口避免冲突
+  // （代理线程 detach 后永远运行，旧端口不会释放）
+  static int& port_offset() {
+    static int offset = 0;
+    return offset;
+  }
+
+  TestProxy() {
+    proxy_port = 18080 + port_offset() * 2;
+    upstream_port = 18081 + port_offset() * 2;
+    ++port_offset();
+  }
 
   // 创建默认测试配置
   static AppConfig make_config(int proxy_port, int upstream_port, bool enable_auth = false,
