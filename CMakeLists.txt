@@ -5,7 +5,8 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# MSVC: 使用 UTF-8 源文件编�?if(MSVC)
+# MSVC: use UTF-8 source file encoding
+if(MSVC)
   add_compile_options(/utf-8)
 endif()
 
