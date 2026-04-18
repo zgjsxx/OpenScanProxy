@@ -1,15 +1,14 @@
 // 集成测试：验证代理服务器端到端流程
-// 包括 HTTP 正向代理、认证级联、策略拦截、CONNECT 隧道等场景
 //
 // 架构：
-//   TestProxy 启动真实代理 (ProxyServer::run) 在后台线程，
-//   MockUpstreamServer 在另一个后台线程模拟上游 HTTP 服务器。
-//   测试主线程作为 TCP 客户端发送请求、读取响应。
+//   每个测试函数启动三个线程：
+//   1. mock_upstream: 简单 HTTP 服务器，监听指定端口，返回固定 200 OK
+//   2. proxy: ProxyServer::run() 在后台线程
+//   3. main: 测试主线程，作为 TCP 客户端
 //
-// 注意：代理的 handle_http_forward 在转发完一个请求后会返回
-//   到 handle_client 的 while(true) 循环继续 recv(cfd) 等待下一个请求。
-//   如果客户端请求带 Connection: close，代理转发+响应后返回 false，
-//   handle_client break 出循环，close(cfd)，客户端 recv 收到 0 或 EOF。
+//   流程: client → proxy → upstream → proxy → client
+//
+//   时序保证：先启动 upstream，wait_for_port 确认就绪后再启动 proxy
 
 #include "openscanproxy/proxy/runtime.hpp"
 #include "openscanproxy/proxy/proxy_server.hpp"
@@ -41,7 +40,6 @@ using openscanproxy::policy::AccessAction;
 using openscanproxy::policy::PolicyConfig;
 using openscanproxy::proxy::ProxyServer;
 using openscanproxy::proxy::Runtime;
-using openscanproxy::core::split;
 
 namespace {
 
@@ -50,8 +48,7 @@ bool expect(bool v, const std::string& msg) {
   return v;
 }
 
-// --- 等待 TCP 端口可连接 ---
-// 反复尝试 connect，成功说明服务已就绪
+// 等待 TCP 端口可连接（说明服务已就绪）
 bool wait_for_port(int port, int timeout_ms = 2000) {
   for (int i = 0; i < timeout_ms / 20; ++i) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -70,15 +67,142 @@ bool wait_for_port(int port, int timeout_ms = 2000) {
   return false;
 }
 
-// --- 简单 TCP 客户端：发送请求并读取完整响应 ---
-// 适用于代理直接生成响应的场景（认证失败、策略拦截等）。
-// 这些响应代理自己发送后 close(cfd)，客户端 recv 会得到 0。
-std::string tcp_send_and_recv_all(const std::string& host, int port,
-                                  const std::string& request,
-                                  int timeout_sec = 5) {
+// 启动一个简单的 mock 上游 HTTP 服务器
+// 监听指定端口，每收到一个请求就返回 "HTTP/1.1 200 OK\r\n...\r\nupstream-ok"
+// 在后台线程运行，stop() 关闭监听 fd 终止线程
+struct MockUpstream {
+  int listen_fd = -1;
+  int port = 0;
+  std::thread thread;
+  bool running = false;
+  std::mutex mu;
+  std::string last_request;
+
+  // 启动并等待就绪
+  bool start_and_wait(int desired_port, int timeout_ms = 2000) {
+    listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_fd < 0) return false;
+    int one = 1;
+    setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(static_cast<uint16_t>(desired_port));
+    if (bind(listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+      close(listen_fd); listen_fd = -1; return false;
+    }
+    socklen_t alen = sizeof(addr);
+    getsockname(listen_fd, reinterpret_cast<sockaddr*>(&addr), &alen);
+    port = ntohs(addr.sin_port);
+    if (listen(listen_fd, 4) != 0) {
+      close(listen_fd); listen_fd = -1; return false;
+    }
+    running = true;
+    thread = std::thread([this]() { serve(); });
+    // 等上游就绪：反复尝试 connect 到自己
+    for (int i = 0; i < timeout_ms / 10; ++i) {
+      int fd2 = socket(AF_INET, SOCK_STREAM, 0);
+      sockaddr_in a2{};
+      a2.sin_family = AF_INET;
+      a2.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+      a2.sin_port = htons(static_cast<uint16_t>(port));
+      if (connect(fd2, reinterpret_cast<sockaddr*>(&a2), sizeof(a2)) == 0) {
+        close(fd2);
+        return true;  // 上游已就绪
+      }
+      close(fd2);
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;  // 超时
+  }
+
+  void serve() {
+    while (running) {
+      sockaddr_in caddr{};
+      socklen_t len = sizeof(caddr);
+      int cfd = accept(listen_fd, reinterpret_cast<sockaddr*>(&caddr), &len);
+      if (cfd < 0) {
+        if (!running) return;
+        continue;
+      }
+      struct timeval tv{};
+      tv.tv_sec = 5;
+      setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+      // 读取请求直到 header 结束
+      std::string req;
+      char buf[8192];
+      while (req.find("\r\n\r\n") == std::string::npos) {
+        auto n = recv(cfd, buf, sizeof(buf), 0);
+        if (n <= 0) break;
+        req.append(buf, static_cast<std::size_t>(n));
+      }
+      // 读取 body（如果有 Content-Length）
+      auto hdr_end = req.find("\r\n\r\n");
+      if (hdr_end != std::string::npos) {
+        std::istringstream hs(req.substr(0, hdr_end));
+        std::string line;
+        std::size_t cl = 0;
+        bool chunked = false;
+        while (std::getline(hs, line)) {
+          if (!line.empty() && line.back() == '\r') line.pop_back();
+          std::string lo = line;
+          std::transform(lo.begin(), lo.end(), lo.begin(), [](unsigned char c){ return std::tolower(c); });
+          if (lo.find("content-length:") == 0) {
+            try { cl = std::stoull(line.substr(line.find(':') + 1)); } catch (...) {}
+          }
+          if (lo.find("transfer-encoding:") == 0 && lo.find("chunked") != std::string::npos) chunked = true;
+        }
+        if (chunked) {
+          while (req.find("\r\n0\r\n") == std::string::npos) {
+            auto n = recv(cfd, buf, sizeof(buf), 0);
+            if (n <= 0) break;
+            req.append(buf, static_cast<std::size_t>(n));
+          }
+        } else if (cl > 0) {
+          while (req.size() < hdr_end + 4 + cl) {
+            auto n = recv(cfd, buf, sizeof(buf), 0);
+            if (n <= 0) break;
+            req.append(buf, static_cast<std::size_t>(n));
+          }
+        }
+      }
+
+      {
+        std::lock_guard<std::mutex> lk(mu);
+        last_request = req;
+      }
+
+      // 返回固定响应
+      std::string body = "upstream-ok";
+      std::ostringstream os;
+      os << "HTTP/1.1 200 OK\r\n"
+         << "Content-Type: text/plain\r\n"
+         << "Content-Length: " << body.size() << "\r\n"
+         << "Connection: close\r\n\r\n"
+         << body;
+      auto resp = os.str();
+      send(cfd, resp.data(), resp.size(), 0);
+      close(cfd);
+    }
+  }
+
+  std::string get_last_request() {
+    std::lock_guard<std::mutex> lk(mu);
+    return last_request;
+  }
+
+  void stop() {
+    running = false;
+    if (listen_fd >= 0) { close(listen_fd); listen_fd = -1; }
+    if (thread.joinable()) thread.join();
+  }
+};
+
+// TCP 客户端：发送请求，读取直到 EOF（代理 close 连接）
+std::string tcp_send_recv_all(int port, const std::string& request, int timeout_sec = 5) {
   int fd = socket(AF_INET, SOCK_STREAM, 0);
   if (fd < 0) return "";
-
   struct timeval tv{};
   tv.tv_sec = timeout_sec;
   tv.tv_usec = 0;
@@ -89,16 +213,9 @@ std::string tcp_send_and_recv_all(const std::string& host, int port,
   addr.sin_family = AF_INET;
   addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   addr.sin_port = htons(static_cast<uint16_t>(port));
-  if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-    close(fd);
-    return "";
-  }
-  if (send(fd, request.data(), request.size(), 0) <= 0) {
-    close(fd);
-    return "";
-  }
+  if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) { close(fd); return ""; }
+  if (send(fd, request.data(), request.size(), 0) <= 0) { close(fd); return ""; }
 
-  // 读取直到 EOF（代理 close 了连接）或超时
   std::string response;
   char buf[8192];
   while (true) {
@@ -110,640 +227,528 @@ std::string tcp_send_and_recv_all(const std::string& host, int port,
   return response;
 }
 
-// --- 从响应原始文本中解析 HTTP 状态码 ---
-int parse_status_from_raw(const std::string& raw) {
+int parse_status(const std::string& raw) {
   if (raw.empty()) return -1;
-  // 响应第一行: HTTP/1.1 200 OK 或 HTTP/1.1 407 ...
-  auto line_end = raw.find("\r\n");
-  if (line_end == std::string::npos) line_end = raw.find("\n");
-  auto first_line = (line_end != std::string::npos) ? raw.substr(0, line_end) : raw;
-  std::istringstream iss(first_line);
-  std::string version;
-  int status = -1;
-  iss >> version >> status;
-  return status;
+  auto le = raw.find("\r\n");
+  if (le == std::string::npos) le = raw.find("\n");
+  auto fl = (le != std::string::npos) ? raw.substr(0, le) : raw;
+  std::istringstream iss(fl);
+  std::string ver; int st = -1;
+  iss >> ver >> st;
+  return st;
 }
 
-// --- 从原始文本中解析完整 HttpResponse ---
-HttpResponse parse_full_response(const std::string& raw) {
-  HttpResponse resp;
-  if (!raw.empty()) {
-    parse_response(raw, resp);
-  }
-  return resp;
+HttpResponse parse_resp(const std::string& raw) {
+  HttpResponse r;
+  if (!raw.empty()) parse_response(raw, r);
+  return r;
 }
 
-// --- Base64 编码 ---
-std::string base64_encode(const std::string& input) {
-  static constexpr char kTable[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+std::string b64(const std::string& in) {
+  static constexpr char T[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   std::string out;
   int val = 0, valb = -6;
-  for (unsigned char c : input) {
-    val = (val << 8) + c;
-    valb += 8;
-    while (valb >= 0) {
-      out.push_back(kTable[(val >> valb) & 0x3F]);
-      valb -= 6;
-    }
-  }
-  if (valb > -6) out.push_back(kTable[((val << 8) >> (valb + 8)) & 0x3F]);
+  for (unsigned char c : in) { val = (val << 8) + c; valb += 8; while (valb >= 0) { out.push_back(T[(val >> valb) & 0x3F]); valb -= 6; } }
+  if (valb > -6) out.push_back(T[((val << 8) >> (valb + 8)) & 0x3F]);
   while (out.size() % 4) out.push_back('=');
   return out;
 }
 
-// --- 创建最小测试配置 ---
-AppConfig make_test_config(int proxy_port, bool enable_auth = false,
-                           const std::string& auth_mode = "basic") {
-  AppConfig cfg;
-  cfg.proxy_listen_host = "127.0.0.1";
-  cfg.proxy_listen_port = static_cast<uint16_t>(proxy_port);
-  cfg.enable_proxy_auth = enable_auth;
-  cfg.proxy_auth_mode = auth_mode;
-  cfg.proxy_auth_user = "testuser";
-  cfg.proxy_auth_password = "testpass";
-  cfg.scanner_type = "mock";
-  cfg.enable_https_mitm = false;
-  cfg.proxy_auth_signing_key = "test-signing-key";
-  // 日志写到 /dev/null，避免创建文件和目录
-  cfg.audit_log_path = "/dev/null";
-  cfg.app_log_path = "/dev/null";
-  cfg.app_log_level = "error";
-  cfg.scan_upload = false;
-  cfg.scan_download = false;
-  return cfg;
+AppConfig make_cfg(int proxy_port, bool auth = false, const std::string& mode = "basic") {
+  AppConfig c;
+  c.proxy_listen_host = "127.0.0.1";
+  c.proxy_listen_port = static_cast<uint16_t>(proxy_port);
+  c.enable_proxy_auth = auth;
+  c.proxy_auth_mode = mode;
+  c.proxy_auth_user = "testuser";
+  c.proxy_auth_password = "testpass";
+  c.scanner_type = "mock";
+  c.enable_https_mitm = false;
+  c.proxy_auth_signing_key = "test-signing-key";
+  c.audit_log_path = "/dev/null";
+  c.app_log_path = "/dev/null";
+  c.app_log_level = "error";
+  c.scan_upload = false;
+  c.scan_download = false;
+  return c;
 }
 
 // ===================================================================
-// 场景 1: Basic 认证 — 无凭据返回 407
+// 场景 1: 无认证 HTTP GET → 200（完整转发链路）
+// ===================================================================
+bool test_http_get_no_auth() {
+  MockUpstream upstream;
+  if (!upstream.start_and_wait(18181)) return expect(false, "http_get_no_auth: upstream not ready");
+
+  const int port = 18080;
+  auto cfg = make_cfg(port);
+  openscanproxy::core::app_logger().configure(cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
+
+  Runtime runtime(cfg);
+  runtime.scanner = openscanproxy::scanner::create_mock_scanner();
+  ProxyServer server(runtime);
+  std::thread proxy_thread([&]() { server.run(); });
+  if (!wait_for_port(port)) { proxy_thread.detach(); upstream.stop(); return expect(false, "http_get_no_auth: proxy not ready"); }
+
+  std::ostringstream req;
+  req << "GET http://127.0.0.1:" << upstream.port << "/test HTTP/1.1\r\n"
+      << "Host: 127.0.0.1:" << upstream.port << "\r\n"
+      << "Connection: close\r\n\r\n";
+
+  auto raw = tcp_send_recv_all(port, req.str());
+  proxy_thread.detach();
+  upstream.stop();
+
+  if (raw.empty()) return expect(false, "http_get_no_auth: no response");
+  HttpResponse resp = parse_resp(raw);
+  bool ok = expect(resp.status == 200, "http_get_no_auth: should be 200, got " + std::to_string(resp.status));
+  ok = expect(std::string(resp.body.begin(), resp.body.end()) == "upstream-ok", "http_get_no_auth: body should be upstream-ok") && ok;
+
+  auto ur = upstream.get_last_request();
+  ok = expect(!ur.empty(), "http_get_no_auth: upstream should receive request") && ok;
+  ok = expect(ur.find("GET /test") != std::string::npos, "http_get_no_auth: upstream request should have GET /test") && ok;
+  return ok;
+}
+
+// ===================================================================
+// 场景 2: HTTP POST body 转发 → 200
+// ===================================================================
+bool test_http_post_with_body() {
+  MockUpstream upstream;
+  if (!upstream.start_and_wait(18182)) return expect(false, "post_with_body: upstream not ready");
+
+  const int port = 18082;
+  auto cfg = make_cfg(port);
+  openscanproxy::core::app_logger().configure(cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
+
+  Runtime runtime(cfg);
+  runtime.scanner = openscanproxy::scanner::create_mock_scanner();
+  ProxyServer server(runtime);
+  std::thread proxy_thread([&]() { server.run(); });
+  if (!wait_for_port(port)) { proxy_thread.detach(); upstream.stop(); return expect(false, "post_with_body: proxy not ready"); }
+
+  std::string body = "hello-post-body";
+  std::ostringstream req;
+  req << "POST http://127.0.0.1:" << upstream.port << "/submit HTTP/1.1\r\n"
+      << "Host: 127.0.0.1:" << upstream.port << "\r\n"
+      << "Content-Length: " << body.size() << "\r\n"
+      << "Content-Type: text/plain\r\n"
+      << "Connection: close\r\n\r\n" << body;
+
+  auto raw = tcp_send_recv_all(port, req.str());
+  proxy_thread.detach();
+  upstream.stop();
+
+  if (raw.empty()) return expect(false, "post_with_body: no response");
+  HttpResponse resp = parse_resp(raw);
+  bool ok = expect(resp.status == 200, "post_with_body: should be 200, got " + std::to_string(resp.status));
+  auto ur = upstream.get_last_request();
+  ok = expect(ur.find("POST /submit") != std::string::npos, "post_with_body: upstream should have POST") && ok;
+  ok = expect(ur.find(body) != std::string::npos, "post_with_body: upstream should have body") && ok;
+  return ok;
+}
+
+// ===================================================================
+// 场景 3: Basic 认证 — 无凭据 → 407
 // ===================================================================
 bool test_basic_auth_no_creds() {
-  const int port = 18080;
-  auto cfg = make_test_config(port, true, "basic");
-  openscanproxy::core::app_logger().configure(
-      cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
+  const int port = 18084;
+  auto cfg = make_cfg(port, true, "basic");
+  openscanproxy::core::app_logger().configure(cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
 
   Runtime runtime(cfg);
   runtime.scanner = openscanproxy::scanner::create_mock_scanner();
   ProxyServer server(runtime);
   std::thread proxy_thread([&]() { server.run(); });
+  if (!wait_for_port(port)) { proxy_thread.detach(); return expect(false, "basic_no_creds: proxy not ready"); }
 
-  if (!wait_for_port(port)) {
-    proxy_thread.detach();
-    return expect(false, "basic_auth_no_creds: proxy not ready");
-  }
-
-  // 不带 Proxy-Authorization 发送请求
-  std::string req = "GET http://example.com/test HTTP/1.1\r\n"
-                    "Host: example.com\r\n"
-                    "Connection: close\r\n\r\n";
-
-  auto raw = tcp_send_and_recv_all("127.0.0.1", port, req);
+  std::string req = "GET http://example.com/test HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n";
+  auto raw = tcp_send_recv_all(port, req);
   proxy_thread.detach();
 
-  if (raw.empty()) return expect(false, "basic_auth_no_creds: no response");
-  int status = parse_status_from_raw(raw);
-  return expect(status == 407, "basic_auth_no_creds: status should be 407, got " + std::to_string(status));
+  if (raw.empty()) return expect(false, "basic_no_creds: no response");
+  return expect(parse_status(raw) == 407, "basic_no_creds: should be 407, got " + std::to_string(parse_status(raw)));
 }
 
 // ===================================================================
-// 场景 2: Basic 认证 — 错误凭据返回 407
+// 场景 4: Basic 认证 — 错误凭据 → 407
 // ===================================================================
 bool test_basic_auth_bad_creds() {
-  const int port = 18082;
-  auto cfg = make_test_config(port, true, "basic");
-  openscanproxy::core::app_logger().configure(
-      cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
-
-  Runtime runtime(cfg);
-  runtime.scanner = openscanproxy::scanner::create_mock_scanner();
-  ProxyServer server(runtime);
-  std::thread proxy_thread([&]() { server.run(); });
-
-  if (!wait_for_port(port)) {
-    proxy_thread.detach();
-    return expect(false, "basic_auth_bad_creds: proxy not ready");
-  }
-
-  auto cred = base64_encode("testuser:wrongpass");
-  std::string req = "GET http://example.com/test HTTP/1.1\r\n"
-                    "Host: example.com\r\n"
-                    "Proxy-Authorization: Basic " + cred + "\r\n"
-                    "Connection: close\r\n\r\n";
-
-  auto raw = tcp_send_and_recv_all("127.0.0.1", port, req);
-  proxy_thread.detach();
-
-  if (raw.empty()) return expect(false, "basic_auth_bad_creds: no response");
-  int status = parse_status_from_raw(raw);
-  return expect(status == 407, "basic_auth_bad_creds: status should be 407, got " + std::to_string(status));
-}
-
-// ===================================================================
-// 场景 3: Basic 认证 — 正确凭据，代理尝试转发到不可达上游（502）
-// ===================================================================
-bool test_basic_auth_valid_creds_upstream_unreachable() {
-  const int port = 18084;
-  auto cfg = make_test_config(port, true, "basic");
-  openscanproxy::core::app_logger().configure(
-      cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
-
-  Runtime runtime(cfg);
-  runtime.scanner = openscanproxy::scanner::create_mock_scanner();
-  ProxyServer server(runtime);
-  std::thread proxy_thread([&]() { server.run(); });
-
-  if (!wait_for_port(port)) {
-    proxy_thread.detach();
-    return expect(false, "basic_auth_valid_creds: proxy not ready");
-  }
-
-  auto cred = base64_encode("testuser:testpass");
-  // 指向一个不可达的上游端口（无人监听）
-  std::string req = "GET http://127.0.0.1:19999/test HTTP/1.1\r\n"
-                    "Host: 127.0.0.1:19999\r\n"
-                    "Proxy-Authorization: Basic " + cred + "\r\n"
-                    "Connection: close\r\n\r\n";
-
-  auto raw = tcp_send_and_recv_all("127.0.0.1", port, req, 8);
-  proxy_thread.detach();
-
-  if (raw.empty()) return expect(false, "basic_auth_valid_creds: no response");
-  int status = parse_status_from_raw(raw);
-  // 认证通过但上游不可达 → 代理返回 502 Bad Gateway
-  return expect(status == 502, "basic_auth_valid_creds: status should be 502 (upstream unreachable), got " + std::to_string(status));
-}
-
-// ===================================================================
-// 场景 4: 无认证 — 上游不可达返回 502
-// ===================================================================
-bool test_no_auth_upstream_unreachable() {
   const int port = 18086;
-  auto cfg = make_test_config(port, false);
-  openscanproxy::core::app_logger().configure(
-      cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
+  auto cfg = make_cfg(port, true, "basic");
+  openscanproxy::core::app_logger().configure(cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
 
   Runtime runtime(cfg);
   runtime.scanner = openscanproxy::scanner::create_mock_scanner();
   ProxyServer server(runtime);
   std::thread proxy_thread([&]() { server.run(); });
+  if (!wait_for_port(port)) { proxy_thread.detach(); return expect(false, "basic_bad_creds: proxy not ready"); }
 
-  if (!wait_for_port(port)) {
-    proxy_thread.detach();
-    return expect(false, "no_auth_upstream_unreachable: proxy not ready");
-  }
-
-  std::string req = "GET http://127.0.0.1:19998/test HTTP/1.1\r\n"
-                    "Host: 127.0.0.1:19998\r\n"
-                    "Connection: close\r\n\r\n";
-
-  auto raw = tcp_send_and_recv_all("127.0.0.1", port, req, 8);
+  auto cred = b64("testuser:wrongpass");
+  std::string req = "GET http://example.com/test HTTP/1.1\r\nHost: example.com\r\nProxy-Authorization: Basic " + cred + "\r\nConnection: close\r\n\r\n";
+  auto raw = tcp_send_recv_all(port, req);
   proxy_thread.detach();
 
-  if (raw.empty()) return expect(false, "no_auth_upstream_unreachable: no response");
-  int status = parse_status_from_raw(raw);
-  return expect(status == 502, "no_auth_upstream_unreachable: status should be 502, got " + std::to_string(status));
+  if (raw.empty()) return expect(false, "basic_bad_creds: no response");
+  return expect(parse_status(raw) == 407, "basic_bad_creds: should be 407, got " + std::to_string(parse_status(raw)));
 }
 
 // ===================================================================
-// 场景 5: 域名黑名单拦截 → 403
+// 场景 5: Basic 认证 — 正确凭据 → 200（转发到上游）
+// ===================================================================
+bool test_basic_auth_valid_creds() {
+  MockUpstream upstream;
+  if (!upstream.start_and_wait(18185)) return expect(false, "basic_valid: upstream not ready");
+
+  const int port = 18088;
+  auto cfg = make_cfg(port, true, "basic");
+  openscanproxy::core::app_logger().configure(cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
+
+  Runtime runtime(cfg);
+  runtime.scanner = openscanproxy::scanner::create_mock_scanner();
+  ProxyServer server(runtime);
+  std::thread proxy_thread([&]() { server.run(); });
+  if (!wait_for_port(port)) { proxy_thread.detach(); upstream.stop(); return expect(false, "basic_valid: proxy not ready"); }
+
+  auto cred = b64("testuser:testpass");
+  std::ostringstream req;
+  req << "GET http://127.0.0.1:" << upstream.port << "/auth HTTP/1.1\r\n"
+      << "Host: 127.0.0.1:" << upstream.port << "\r\n"
+      << "Proxy-Authorization: Basic " << cred << "\r\n"
+      << "Connection: close\r\n\r\n";
+
+  auto raw = tcp_send_recv_all(port, req.str());
+  proxy_thread.detach();
+  upstream.stop();
+
+  if (raw.empty()) return expect(false, "basic_valid: no response");
+  HttpResponse resp = parse_resp(raw);
+  return expect(resp.status == 200, "basic_valid: should be 200 (forwarded), got " + std::to_string(resp.status));
+}
+
+// ===================================================================
+// 场景 6: 域名黑名单 → 403
 // ===================================================================
 bool test_domain_blacklist_block() {
-  const int port = 18088;
-  auto cfg = make_test_config(port, false);
-  openscanproxy::core::app_logger().configure(
-      cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
+  const int port = 18090;
+  auto cfg = make_cfg(port);
+  openscanproxy::core::app_logger().configure(cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
 
   Runtime runtime(cfg);
   runtime.scanner = openscanproxy::scanner::create_mock_scanner();
-
-  PolicyConfig policy_cfg;
-  policy_cfg.default_access_action = AccessAction::Allow;
-  policy_cfg.domain_blacklist = {"blocked.example.com"};
-  runtime.policy.update(policy_cfg);
+  PolicyConfig pc; pc.default_access_action = AccessAction::Allow; pc.domain_blacklist = {"blocked.example.com"};
+  runtime.policy.update(pc);
 
   ProxyServer server(runtime);
   std::thread proxy_thread([&]() { server.run(); });
+  if (!wait_for_port(port)) { proxy_thread.detach(); return expect(false, "domain_blacklist: proxy not ready"); }
 
-  if (!wait_for_port(port)) {
-    proxy_thread.detach();
-    return expect(false, "domain_blacklist_block: proxy not ready");
-  }
-
-  std::string req = "GET http://blocked.example.com/test HTTP/1.1\r\n"
-                    "Host: blocked.example.com\r\n"
-                    "Connection: close\r\n\r\n";
-
-  auto raw = tcp_send_and_recv_all("127.0.0.1", port, req);
+  std::string req = "GET http://blocked.example.com/test HTTP/1.1\r\nHost: blocked.example.com\r\nConnection: close\r\n\r\n";
+  auto raw = tcp_send_recv_all(port, req);
   proxy_thread.detach();
 
-  if (raw.empty()) return expect(false, "domain_blacklist_block: no response");
-  int status = parse_status_from_raw(raw);
-  bool ok = expect(status == 403, "domain_blacklist_block: status should be 403, got " + std::to_string(status));
-  ok = expect(raw.find("Blocked") != std::string::npos || raw.find("403") != std::string::npos,
-              "domain_blacklist_block: body should contain block message") && ok;
-  return ok;
+  if (raw.empty()) return expect(false, "domain_blacklist: no response");
+  return expect(parse_status(raw) == 403, "domain_blacklist: should be 403, got " + std::to_string(parse_status(raw)));
 }
 
 // ===================================================================
-// 场景 6: URL 黑名单拦截 → 403
+// 场景 7: URL 黑名单 → 403
 // ===================================================================
 bool test_url_blacklist_block() {
-  const int port = 18090;
-  auto cfg = make_test_config(port, false);
-  openscanproxy::core::app_logger().configure(
-      cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
-
-  Runtime runtime(cfg);
-  runtime.scanner = openscanproxy::scanner::create_mock_scanner();
-
-  PolicyConfig policy_cfg;
-  policy_cfg.default_access_action = AccessAction::Allow;
-  policy_cfg.url_blacklist = {"http://blocked.example.com/admin/"};
-  runtime.policy.update(policy_cfg);
-
-  ProxyServer server(runtime);
-  std::thread proxy_thread([&]() { server.run(); });
-
-  if (!wait_for_port(port)) {
-    proxy_thread.detach();
-    return expect(false, "url_blacklist_block: proxy not ready");
-  }
-
-  std::string req = "GET http://blocked.example.com/admin/panel HTTP/1.1\r\n"
-                    "Host: blocked.example.com\r\n"
-                    "Connection: close\r\n\r\n";
-
-  auto raw = tcp_send_and_recv_all("127.0.0.1", port, req);
-  proxy_thread.detach();
-
-  if (raw.empty()) return expect(false, "url_blacklist_block: no response");
-  int status = parse_status_from_raw(raw);
-  return expect(status == 403, "url_blacklist_block: status should be 403, got " + std::to_string(status));
-}
-
-// ===================================================================
-// 场景 7: 域名白名单放行（默认拒绝）+ 上游不可达 → 502（说明白名单生效）
-// ===================================================================
-bool test_domain_whitelist_allow_default_block() {
   const int port = 18092;
-  auto cfg = make_test_config(port, false);
-  openscanproxy::core::app_logger().configure(
-      cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
+  auto cfg = make_cfg(port);
+  openscanproxy::core::app_logger().configure(cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
 
   Runtime runtime(cfg);
   runtime.scanner = openscanproxy::scanner::create_mock_scanner();
-
-  PolicyConfig policy_cfg;
-  policy_cfg.default_access_action = AccessAction::Block;
-  policy_cfg.domain_whitelist = {"127.0.0.1"};
-  runtime.policy.update(policy_cfg);
+  PolicyConfig pc; pc.default_access_action = AccessAction::Allow; pc.url_blacklist = {"http://blocked.example.com/admin/"};
+  runtime.policy.update(pc);
 
   ProxyServer server(runtime);
   std::thread proxy_thread([&]() { server.run(); });
+  if (!wait_for_port(port)) { proxy_thread.detach(); return expect(false, "url_blacklist: proxy not ready"); }
 
-  if (!wait_for_port(port)) {
-    proxy_thread.detach();
-    return expect(false, "domain_whitelist_allow: proxy not ready");
-  }
-
-  // 白名单域名 → 代理尝试转发（上游不可达 → 502，说明白名单放行生效）
-  std::string req = "GET http://127.0.0.1:19997/test HTTP/1.1\r\n"
-                    "Host: 127.0.0.1:19997\r\n"
-                    "Connection: close\r\n\r\n";
-
-  auto raw = tcp_send_and_recv_all("127.0.0.1", port, req, 8);
+  std::string req = "GET http://blocked.example.com/admin/panel HTTP/1.1\r\nHost: blocked.example.com\r\nConnection: close\r\n\r\n";
+  auto raw = tcp_send_recv_all(port, req);
   proxy_thread.detach();
 
-  if (raw.empty()) return expect(false, "domain_whitelist_allow: no response");
-  int status = parse_status_from_raw(raw);
-  // 白名单放行 → 代理转发到不可达上游 → 502（不是 403）
-  return expect(status == 502, "domain_whitelist_allow: whitelisted domain should reach upstream (502 not 403), got " + std::to_string(status));
+  if (raw.empty()) return expect(false, "url_blacklist: no response");
+  return expect(parse_status(raw) == 403, "url_blacklist: should be 403, got " + std::to_string(parse_status(raw)));
 }
 
 // ===================================================================
-// 场景 8: 默认拒绝 + 非白名单域名 → 403
+// 场景 8: 域名白名单放行（默认拒绝）→ 200（转发到上游）
+// ===================================================================
+bool test_domain_whitelist_allow() {
+  MockUpstream upstream;
+  if (!upstream.start_and_wait(18188)) return expect(false, "whitelist_allow: upstream not ready");
+
+  const int port = 18094;
+  auto cfg = make_cfg(port);
+  openscanproxy::core::app_logger().configure(cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
+
+  Runtime runtime(cfg);
+  runtime.scanner = openscanproxy::scanner::create_mock_scanner();
+  PolicyConfig pc; pc.default_access_action = AccessAction::Block; pc.domain_whitelist = {"127.0.0.1"};
+  runtime.policy.update(pc);
+
+  ProxyServer server(runtime);
+  std::thread proxy_thread([&]() { server.run(); });
+  if (!wait_for_port(port)) { proxy_thread.detach(); upstream.stop(); return expect(false, "whitelist_allow: proxy not ready"); }
+
+  std::ostringstream req;
+  req << "GET http://127.0.0.1:" << upstream.port << "/ok HTTP/1.1\r\n"
+      << "Host: 127.0.0.1:" << upstream.port << "\r\n"
+      << "Connection: close\r\n\r\n";
+
+  auto raw = tcp_send_recv_all(port, req.str());
+  proxy_thread.detach();
+  upstream.stop();
+
+  if (raw.empty()) return expect(false, "whitelist_allow: no response");
+  HttpResponse resp = parse_resp(raw);
+  bool ok = expect(resp.status == 200, "whitelist_allow: should be 200, got " + std::to_string(resp.status));
+  ok = expect(std::string(resp.body.begin(), resp.body.end()) == "upstream-ok", "whitelist_allow: body should be upstream-ok") && ok;
+  return ok;
+}
+
+// ===================================================================
+// 场景 9: 默认拒绝 + 非白名单 → 403
 // ===================================================================
 bool test_default_block_non_whitelisted() {
-  const int port = 18094;
-  auto cfg = make_test_config(port, false);
-  openscanproxy::core::app_logger().configure(
-      cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
+  const int port = 18096;
+  auto cfg = make_cfg(port);
+  openscanproxy::core::app_logger().configure(cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
 
   Runtime runtime(cfg);
   runtime.scanner = openscanproxy::scanner::create_mock_scanner();
-
-  PolicyConfig policy_cfg;
-  policy_cfg.default_access_action = AccessAction::Block;
-  policy_cfg.domain_whitelist = {"allowed.example.com"};
-  runtime.policy.update(policy_cfg);
+  PolicyConfig pc; pc.default_access_action = AccessAction::Block; pc.domain_whitelist = {"allowed.example.com"};
+  runtime.policy.update(pc);
 
   ProxyServer server(runtime);
   std::thread proxy_thread([&]() { server.run(); });
+  if (!wait_for_port(port)) { proxy_thread.detach(); return expect(false, "default_block: proxy not ready"); }
 
-  if (!wait_for_port(port)) {
-    proxy_thread.detach();
-    return expect(false, "default_block_non_whitelisted: proxy not ready");
-  }
-
-  std::string req = "GET http://other.example.com/test HTTP/1.1\r\n"
-                    "Host: other.example.com\r\n"
-                    "Connection: close\r\n\r\n";
-
-  auto raw = tcp_send_and_recv_all("127.0.0.1", port, req);
+  std::string req = "GET http://other.example.com/test HTTP/1.1\r\nHost: other.example.com\r\nConnection: close\r\n\r\n";
+  auto raw = tcp_send_recv_all(port, req);
   proxy_thread.detach();
 
-  if (raw.empty()) return expect(false, "default_block_non_whitelisted: no response");
-  int status = parse_status_from_raw(raw);
-  return expect(status == 403, "default_block_non_whitelisted: non-whitelisted should be 403, got " + std::to_string(status));
+  if (raw.empty()) return expect(false, "default_block: no response");
+  return expect(parse_status(raw) == 403, "default_block: should be 403, got " + std::to_string(parse_status(raw)));
 }
 
 // ===================================================================
-// 场景 9: 黑名单优先于白名单 → 403
+// 场景 10: 黑名单优先于白名单 → 403
 // ===================================================================
 bool test_blacklist_over_whitelist() {
-  const int port = 18096;
-  auto cfg = make_test_config(port, false);
-  openscanproxy::core::app_logger().configure(
-      cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
+  MockUpstream upstream;
+  if (!upstream.start_and_wait(18190)) return expect(false, "bl_over_wl: upstream not ready");
+
+  const int port = 18098;
+  auto cfg = make_cfg(port);
+  openscanproxy::core::app_logger().configure(cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
 
   Runtime runtime(cfg);
   runtime.scanner = openscanproxy::scanner::create_mock_scanner();
-
-  PolicyConfig policy_cfg;
-  policy_cfg.default_access_action = AccessAction::Allow;
-  policy_cfg.domain_whitelist = {"mixed.example.com"};
-  policy_cfg.domain_blacklist = {"mixed.example.com"};
-  runtime.policy.update(policy_cfg);
+  PolicyConfig pc; pc.default_access_action = AccessAction::Allow;
+  pc.domain_whitelist = {"127.0.0.1"}; pc.domain_blacklist = {"127.0.0.1"};
+  runtime.policy.update(pc);
 
   ProxyServer server(runtime);
   std::thread proxy_thread([&]() { server.run(); });
+  if (!wait_for_port(port)) { proxy_thread.detach(); upstream.stop(); return expect(false, "bl_over_wl: proxy not ready"); }
 
-  if (!wait_for_port(port)) {
-    proxy_thread.detach();
-    return expect(false, "blacklist_over_whitelist: proxy not ready");
-  }
+  std::ostringstream req;
+  req << "GET http://127.0.0.1:" << upstream.port << "/test HTTP/1.1\r\n"
+      << "Host: 127.0.0.1:" << upstream.port << "\r\n"
+      << "Connection: close\r\n\r\n";
 
-  std::string req = "GET http://mixed.example.com/test HTTP/1.1\r\n"
-                    "Host: mixed.example.com\r\n"
-                    "Connection: close\r\n\r\n";
-
-  auto raw = tcp_send_and_recv_all("127.0.0.1", port, req);
+  auto raw = tcp_send_recv_all(port, req.str());
   proxy_thread.detach();
+  upstream.stop();
 
-  if (raw.empty()) return expect(false, "blacklist_over_whitelist: no response");
-  int status = parse_status_from_raw(raw);
-  return expect(status == 403, "blacklist_over_whitelist: blacklist should override whitelist, got " + std::to_string(status));
+  if (raw.empty()) return expect(false, "bl_over_wl: no response");
+  return expect(parse_status(raw) == 403, "bl_over_wl: blacklist should override whitelist, got " + std::to_string(parse_status(raw)));
 }
 
 // ===================================================================
-// 场景 10: Portal 认证 — 无认证浏览器请求触发 302 重定向
+// 场景 11: Portal 认证 — 浏览器请求 → 302 重定向
 // ===================================================================
 bool test_portal_redirect_browser() {
-  const int port = 18098;
-  auto cfg = make_test_config(port, true, "portal");
-  openscanproxy::core::app_logger().configure(
-      cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
+  const int port = 18100;
+  auto cfg = make_cfg(port, true, "portal");
+  openscanproxy::core::app_logger().configure(cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
 
   Runtime runtime(cfg);
   runtime.scanner = openscanproxy::scanner::create_mock_scanner();
   ProxyServer server(runtime);
   std::thread proxy_thread([&]() { server.run(); });
+  if (!wait_for_port(port)) { proxy_thread.detach(); return expect(false, "portal_redirect: proxy not ready"); }
 
-  if (!wait_for_port(port)) {
-    proxy_thread.detach();
-    return expect(false, "portal_redirect_browser: proxy not ready");
-  }
-
-  std::string req = "GET http://example.com/page HTTP/1.1\r\n"
-                    "Host: example.com\r\n"
-                    "User-Agent: Mozilla/5.0\r\n"
-                    "Accept: text/html\r\n"
-                    "Connection: close\r\n\r\n";
-
-  auto raw = tcp_send_and_recv_all("127.0.0.1", port, req);
+  std::string req = "GET http://example.com/page HTTP/1.1\r\nHost: example.com\r\nUser-Agent: Mozilla/5.0\r\nAccept: text/html\r\nConnection: close\r\n\r\n";
+  auto raw = tcp_send_recv_all(port, req);
   proxy_thread.detach();
 
-  if (raw.empty()) return expect(false, "portal_redirect_browser: no response");
-  HttpResponse resp = parse_full_response(raw);
-  bool ok = expect(resp.status == 302, "portal_redirect_browser: status should be 302, got " + std::to_string(resp.status));
-  auto location = header_get(resp.headers, "Location");
-  ok = expect(!location.empty(), "portal_redirect_browser: should have Location header") && ok;
-  ok = expect(location.find("/login") != std::string::npos,
-              "portal_redirect_browser: Location should point to portal login") && ok;
+  if (raw.empty()) return expect(false, "portal_redirect: no response");
+  HttpResponse resp = parse_resp(raw);
+  bool ok = expect(resp.status == 302, "portal_redirect: should be 302, got " + std::to_string(resp.status));
+  auto loc = header_get(resp.headers, "Location");
+  ok = expect(!loc.empty(), "portal_redirect: should have Location") && ok;
+  ok = expect(loc.find("/login") != std::string::npos, "portal_redirect: Location should point to login") && ok;
   return ok;
 }
 
 // ===================================================================
-// 场景 11: Portal 认证 — 子资源请求不触发 302（返回 403）
+// 场景 12: Portal 认证 — 子资源请求 → 403（不重定向）
 // ===================================================================
 bool test_portal_no_redirect_for_script() {
-  const int port = 18100;
-  auto cfg = make_test_config(port, true, "portal");
-  openscanproxy::core::app_logger().configure(
-      cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
+  const int port = 18102;
+  auto cfg = make_cfg(port, true, "portal");
+  openscanproxy::core::app_logger().configure(cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
 
   Runtime runtime(cfg);
   runtime.scanner = openscanproxy::scanner::create_mock_scanner();
   ProxyServer server(runtime);
   std::thread proxy_thread([&]() { server.run(); });
+  if (!wait_for_port(port)) { proxy_thread.detach(); return expect(false, "portal_no_redirect: proxy not ready"); }
 
-  if (!wait_for_port(port)) {
-    proxy_thread.detach();
-    return expect(false, "portal_no_redirect_script: proxy not ready");
-  }
-
-  std::string req = "GET http://example.com/script.js HTTP/1.1\r\n"
-                    "Host: example.com\r\n"
-                    "User-Agent: Mozilla/5.0\r\n"
-                    "Sec-Fetch-Dest: script\r\n"
-                    "Sec-Fetch-Mode: no-cors\r\n"
-                    "Connection: close\r\n\r\n";
-
-  auto raw = tcp_send_and_recv_all("127.0.0.1", port, req);
+  std::string req = "GET http://example.com/script.js HTTP/1.1\r\nHost: example.com\r\nUser-Agent: Mozilla/5.0\r\nSec-Fetch-Dest: script\r\nSec-Fetch-Mode: no-cors\r\nConnection: close\r\n\r\n";
+  auto raw = tcp_send_recv_all(port, req);
   proxy_thread.detach();
 
-  if (raw.empty()) return expect(false, "portal_no_redirect_script: no response");
-  int status = parse_status_from_raw(raw);
-  // 子资源不应触发 302 重定向，应返回 403
-  return expect(status == 403, "portal_no_redirect_script: script should get 403 not 302, got " + std::to_string(status));
+  if (raw.empty()) return expect(false, "portal_no_redirect: no response");
+  return expect(parse_status(raw) == 403, "portal_no_redirect: should be 403 not 302, got " + std::to_string(parse_status(raw)));
 }
 
 // ===================================================================
-// 场景 12: Portal 认证 — 域级 Cookie 有效（上游不可达 → 502，说明认证通过）
+// 场景 13: Portal Cookie 有效 → 200（转发到上游）
 // ===================================================================
 bool test_portal_cookie_valid() {
-  const int port = 18102;
-  auto cfg = make_test_config(port, true, "portal");
-  openscanproxy::core::app_logger().configure(
-      cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
+  MockUpstream upstream;
+  if (!upstream.start_and_wait(18183)) return expect(false, "portal_cookie: upstream not ready");
+
+  const int port = 18104;
+  auto cfg = make_cfg(port, true, "portal");
+  openscanproxy::core::app_logger().configure(cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
 
   Runtime runtime(cfg);
   runtime.scanner = openscanproxy::scanner::create_mock_scanner();
   ProxyServer server(runtime);
   std::thread proxy_thread([&]() { server.run(); });
+  if (!wait_for_port(port)) { proxy_thread.detach(); upstream.stop(); return expect(false, "portal_cookie: proxy not ready"); }
 
-  if (!wait_for_port(port)) {
-    proxy_thread.detach();
-    return expect(false, "portal_cookie_valid: proxy not ready");
-  }
-
-  // 构造有效的域级 Cookie（绑定主机 127.0.0.1）
   auto cookie_value = runtime.build_proxy_auth_cookie_value("portaluser", "127.0.0.1");
+  std::ostringstream req;
+  req << "GET http://127.0.0.1:" << upstream.port << "/portal HTTP/1.1\r\n"
+      << "Host: 127.0.0.1:" << upstream.port << "\r\n"
+      << "Cookie: osp_proxy_auth_insecure=" << cookie_value << "\r\n"
+      << "Connection: close\r\n\r\n";
 
-  std::string req = "GET http://127.0.0.1:19996/test HTTP/1.1\r\n"
-                    "Host: 127.0.0.1:19996\r\n"
-                    "Cookie: osp_proxy_auth_insecure=" + cookie_value + "\r\n"
-                    "Connection: close\r\n\r\n";
-
-  auto raw = tcp_send_and_recv_all("127.0.0.1", port, req, 8);
+  auto raw = tcp_send_recv_all(port, req.str());
   proxy_thread.detach();
+  upstream.stop();
 
-  if (raw.empty()) return expect(false, "portal_cookie_valid: no response");
-  int status = parse_status_from_raw(raw);
-  // Cookie 有效 → 认证通过 → 代理转发到不可达上游 → 502（不是 302/403/407）
-  bool ok = expect(status == 502, "portal_cookie_valid: valid cookie should allow forwarding (502 not 403/407/302), got " + std::to_string(status));
-  return ok;
+  if (raw.empty()) return expect(false, "portal_cookie: no response");
+  HttpResponse resp = parse_resp(raw);
+  return expect(resp.status == 200, "portal_cookie: valid cookie should forward (200), got " + std::to_string(resp.status));
 }
 
 // ===================================================================
-// 场景 13: Portal 认证 — 域级 Cookie 过期 → 302 或 403
+// 场景 14: Portal Cookie 过期 → 302 或 403
 // ===================================================================
 bool test_portal_cookie_expired() {
-  const int port = 18104;
-  auto cfg = make_test_config(port, true, "portal");
-  openscanproxy::core::app_logger().configure(
-      cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
+  const int port = 18106;
+  auto cfg = make_cfg(port, true, "portal");
+  openscanproxy::core::app_logger().configure(cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
 
   Runtime runtime(cfg);
   runtime.scanner = openscanproxy::scanner::create_mock_scanner();
   ProxyServer server(runtime);
   std::thread proxy_thread([&]() { server.run(); });
+  if (!wait_for_port(port)) { proxy_thread.detach(); return expect(false, "portal_expired: proxy not ready"); }
 
-  if (!wait_for_port(port)) {
-    proxy_thread.detach();
-    return expect(false, "portal_cookie_expired: proxy not ready");
-  }
-
-  // 构造已过期的 Cookie（exp_seconds=1，签名不匹配但足以触发认证失败）
-  std::string expired_cookie = "portaluser|1|invalidsignature";
-
-  std::string req = "GET http://example.com/expired HTTP/1.1\r\n"
-                    "Host: example.com\r\n"
-                    "Cookie: osp_proxy_auth_insecure=" + expired_cookie + "\r\n"
-                    "User-Agent: Mozilla/5.0\r\n"
-                    "Accept: text/html\r\n"
-                    "Connection: close\r\n\r\n";
-
-  auto raw = tcp_send_and_recv_all("127.0.0.1", port, req);
+  std::string req = "GET http://example.com/expired HTTP/1.1\r\nHost: example.com\r\nCookie: osp_proxy_auth_insecure=portaluser|1|badsig\r\nUser-Agent: Mozilla/5.0\r\nAccept: text/html\r\nConnection: close\r\n\r\n";
+  auto raw = tcp_send_recv_all(port, req);
   proxy_thread.detach();
 
-  if (raw.empty()) return expect(false, "portal_cookie_expired: no response");
-  int status = parse_status_from_raw(raw);
-  // 过期 Cookie → 认证失败 → 浏览器请求触发 302 或 403
-  return expect(status == 302 || status == 403,
-                "portal_cookie_expired: expired cookie should get 302 or 403, got " + std::to_string(status));
+  if (raw.empty()) return expect(false, "portal_expired: no response");
+  int st = parse_status(raw);
+  return expect(st == 302 || st == 403, "portal_expired: should be 302 or 403, got " + std::to_string(st));
 }
 
 // ===================================================================
-// 场景 14: 认证通过 + 策略拦截 → 403
+// 场景 15: 认证通过 + 策略拦截 → 403
 // ===================================================================
 bool test_auth_pass_policy_block() {
-  const int port = 18106;
-  auto cfg = make_test_config(port, true, "basic");
-  openscanproxy::core::app_logger().configure(
-      cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
-
-  Runtime runtime(cfg);
-  runtime.scanner = openscanproxy::scanner::create_mock_scanner();
-
-  PolicyConfig policy_cfg;
-  policy_cfg.default_access_action = AccessAction::Allow;
-  policy_cfg.domain_blacklist = {"blocked.example.com"};
-  runtime.policy.update(policy_cfg);
-
-  ProxyServer server(runtime);
-  std::thread proxy_thread([&]() { server.run(); });
-
-  if (!wait_for_port(port)) {
-    proxy_thread.detach();
-    return expect(false, "auth_pass_policy_block: proxy not ready");
-  }
-
-  auto cred = base64_encode("testuser:testpass");
-  std::string req = "GET http://blocked.example.com/test HTTP/1.1\r\n"
-                    "Host: blocked.example.com\r\n"
-                    "Proxy-Authorization: Basic " + cred + "\r\n"
-                    "Connection: close\r\n\r\n";
-
-  auto raw = tcp_send_and_recv_all("127.0.0.1", port, req);
-  proxy_thread.detach();
-
-  if (raw.empty()) return expect(false, "auth_pass_policy_block: no response");
-  int status = parse_status_from_raw(raw);
-  return expect(status == 403, "auth_pass_policy_block: auth pass but policy block → 403, got " + std::to_string(status));
-}
-
-// ===================================================================
-// 场景 15: CONNECT 隧道 — 无 MITM 认证失败返回 407
-// ===================================================================
-bool test_connect_tunnel_auth_required() {
   const int port = 18108;
-  auto cfg = make_test_config(port, true, "basic");
-  openscanproxy::core::app_logger().configure(
-      cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
+  auto cfg = make_cfg(port, true, "basic");
+  openscanproxy::core::app_logger().configure(cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
+
+  Runtime runtime(cfg);
+  runtime.scanner = openscanproxy::scanner::create_mock_scanner();
+  PolicyConfig pc; pc.default_access_action = AccessAction::Allow; pc.domain_blacklist = {"blocked.example.com"};
+  runtime.policy.update(pc);
+
+  ProxyServer server(runtime);
+  std::thread proxy_thread([&]() { server.run(); });
+  if (!wait_for_port(port)) { proxy_thread.detach(); return expect(false, "auth_policy: proxy not ready"); }
+
+  auto cred = b64("testuser:testpass");
+  std::string req = "GET http://blocked.example.com/test HTTP/1.1\r\nHost: blocked.example.com\r\nProxy-Authorization: Basic " + cred + "\r\nConnection: close\r\n\r\n";
+  auto raw = tcp_send_recv_all(port, req);
+  proxy_thread.detach();
+
+  if (raw.empty()) return expect(false, "auth_policy: no response");
+  return expect(parse_status(raw) == 403, "auth_policy: auth pass but policy block → 403, got " + std::to_string(parse_status(raw)));
+}
+
+// ===================================================================
+// 场景 16: CONNECT 隧道 — 认证失败 → 407
+// ===================================================================
+bool test_connect_auth_required() {
+  const int port = 18110;
+  auto cfg = make_cfg(port, true, "basic");
+  openscanproxy::core::app_logger().configure(cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
 
   Runtime runtime(cfg);
   runtime.scanner = openscanproxy::scanner::create_mock_scanner();
   ProxyServer server(runtime);
   std::thread proxy_thread([&]() { server.run(); });
+  if (!wait_for_port(port)) { proxy_thread.detach(); return expect(false, "connect_auth: proxy not ready"); }
 
-  if (!wait_for_port(port)) {
-    proxy_thread.detach();
-    return expect(false, "connect_tunnel_auth_required: proxy not ready");
-  }
-
-  std::string req = "CONNECT example.com:443 HTTP/1.1\r\n"
-                    "Host: example.com:443\r\n\r\n";
-
-  auto raw = tcp_send_and_recv_all("127.0.0.1", port, req);
+  std::string req = "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n";
+  auto raw = tcp_send_recv_all(port, req);
   proxy_thread.detach();
 
-  if (raw.empty()) return expect(false, "connect_tunnel_auth_required: no response");
-  int status = parse_status_from_raw(raw);
-  return expect(status == 407, "connect_tunnel_auth_required: CONNECT without auth should get 407, got " + std::to_string(status));
+  if (raw.empty()) return expect(false, "connect_auth: no response");
+  return expect(parse_status(raw) == 407, "connect_auth: should be 407, got " + std::to_string(parse_status(raw)));
 }
 
 // ===================================================================
-// 场景 16: CONNECT 隧道 — 无认证无 MITM 返回 200
+// 场景 17: CONNECT 隧道 — 无 MITM → 200 Connection Established
 // ===================================================================
 bool test_connect_tunnel_no_mitm() {
-  const int port = 18110;
-  auto cfg = make_test_config(port, false);
+  const int port = 18112;
+  auto cfg = make_cfg(port);
   cfg.enable_https_mitm = false;
-  openscanproxy::core::app_logger().configure(
-      cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
+  openscanproxy::core::app_logger().configure(cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
 
   Runtime runtime(cfg);
   runtime.scanner = openscanproxy::scanner::create_mock_scanner();
   ProxyServer server(runtime);
   std::thread proxy_thread([&]() { server.run(); });
+  if (!wait_for_port(port)) { proxy_thread.detach(); return expect(false, "connect_tunnel: proxy not ready"); }
 
-  if (!wait_for_port(port)) {
-    proxy_thread.detach();
-    return expect(false, "connect_tunnel_no_mitm: proxy not ready");
-  }
+  // CONNECT 到可达的上游（mock 服务器）
+  MockUpstream upstream;
+  if (!upstream.start_and_wait(18193)) { proxy_thread.detach(); return expect(false, "connect_tunnel: upstream not ready"); }
 
-  // CONNECT 到一个可达目标（上游 mock 服务器端口）
-  // 注意：这里需要一个可达的目标，否则代理返回 502
-  // 用端口 18111（无服务监听）测试隧道对不可达目标的处理，
-  // 或者用可达目标验证 200 Connection Established
-  // 先测试不可达目标的 502
-  std::string req = "CONNECT 127.0.0.1:19995 HTTP/1.1\r\n"
-                    "Host: 127.0.0.1:19995\r\n\r\n";
+  std::ostringstream req;
+  req << "CONNECT 127.0.0.1:" << upstream.port << " HTTP/1.1\r\n"
+      << "Host: 127.0.0.1:" << upstream.port << "\r\n\r\n";
 
   int fd = socket(AF_INET, SOCK_STREAM, 0);
-  struct timeval tv{};
-  tv.tv_sec = 5;
+  struct timeval tv{}; tv.tv_sec = 5;
   setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
   sockaddr_in addr{};
@@ -751,18 +756,14 @@ bool test_connect_tunnel_no_mitm() {
   addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   addr.sin_port = htons(static_cast<uint16_t>(port));
   if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-    close(fd);
-    proxy_thread.detach();
-    return expect(false, "connect_tunnel_no_mitm: connect to proxy failed");
+    close(fd); proxy_thread.detach(); upstream.stop();
+    return expect(false, "connect_tunnel: connect to proxy failed");
+  }
+  if (send(fd, req.str().data(), req.str().size(), 0) <= 0) {
+    close(fd); proxy_thread.detach(); upstream.stop();
+    return expect(false, "connect_tunnel: send failed");
   }
 
-  if (send(fd, req.data(), req.size(), 0) <= 0) {
-    close(fd);
-    proxy_thread.detach();
-    return expect(false, "connect_tunnel_no_mitm: send failed");
-  }
-
-  // 读取代理对 CONNECT 的响应
   char buf[8192];
   std::string response;
   while (response.find("\r\n\r\n") == std::string::npos) {
@@ -772,45 +773,12 @@ bool test_connect_tunnel_no_mitm() {
   }
   close(fd);
   proxy_thread.detach();
+  upstream.stop();
 
-  if (response.empty()) return expect(false, "connect_tunnel_no_mitm: no response");
-
-  int status = parse_status_from_raw(response);
-  // CONNECT 到不可达目标 → 502 Bad Gateway
-  // CONNECT 到可达目标 → 200 Connection Established
-  // 验证代理确实处理了 CONNECT（返回了状态码，而不是忽略）
-  return expect(status == 200 || status == 502,
-                "connect_tunnel_no_mitm: should get 200 or 502 for CONNECT, got " + std::to_string(status));
-}
-
-// ===================================================================
-// 场景 17: 请求格式错误 → 代理关闭连接（无响应或空响应）
-// ===================================================================
-bool test_malformed_request() {
-  const int port = 18112;
-  auto cfg = make_test_config(port, false);
-  openscanproxy::core::app_logger().configure(
-      cfg.app_log_path, cfg.app_log_level, cfg.app_log_max_files, cfg.app_log_max_size_mb);
-
-  Runtime runtime(cfg);
-  runtime.scanner = openscanproxy::scanner::create_mock_scanner();
-  ProxyServer server(runtime);
-  std::thread proxy_thread([&]() { server.run(); });
-
-  if (!wait_for_port(port)) {
-    proxy_thread.detach();
-    return expect(false, "malformed_request: proxy not ready");
-  }
-
-  // 发送格式错误的请求（无方法行）
-  std::string req = "garbage\r\n\r\n";
-
-  auto raw = tcp_send_and_recv_all("127.0.0.1", port, req);
-  proxy_thread.detach();
-
-  // 代理对格式错误的请求直接关闭连接，可能返回空或错误响应
-  // 只验证代理没有崩溃（能连接、能关闭）
-  return expect(true, "malformed_request: proxy did not crash (always passes)");
+  if (response.empty()) return expect(false, "connect_tunnel: no response");
+  bool ok = expect(response.find("200") != std::string::npos, "connect_tunnel: should contain 200");
+  ok = expect(response.find("Connection Established") != std::string::npos, "connect_tunnel: should contain Connection Established") && ok;
+  return ok;
 }
 
 }  // namespace
@@ -819,23 +787,23 @@ int main() {
   bool ok = true;
   std::cout << "Running integration tests...\n\n";
 
-  ok = test_basic_auth_no_creds() && ok;           // 1
-  ok = test_basic_auth_bad_creds() && ok;           // 2
-  ok = test_basic_auth_valid_creds_upstream_unreachable() && ok;  // 3
-  ok = test_no_auth_upstream_unreachable() && ok;        // 4 -- fix typo below
-  ok = test_domain_blacklist_block() && ok;         // 5
-  ok = test_url_blacklist_block() && ok;            // 6
-  ok = test_domain_whitelist_allow_default_block() && ok;  // 7
-  ok = test_default_block_non_whitelisted() && ok;  // 8
-  ok = test_blacklist_over_whitelist() && ok;       // 9
-  ok = test_portal_redirect_browser() && ok;        // 10
-  ok = test_portal_no_redirect_for_script() && ok;  // 11
-  ok = test_portal_cookie_valid() && ok;            // 12
-  ok = test_portal_cookie_expired() && ok;          // 13
-  ok = test_auth_pass_policy_block() && ok;         // 14
-  ok = test_connect_tunnel_auth_required() && ok;   // 15
-  ok = test_connect_tunnel_no_mitm() && ok;         // 16
-  ok = test_malformed_request() && ok;              // 17
+  ok = test_http_get_no_auth() && ok;
+  ok = test_http_post_with_body() && ok;
+  ok = test_basic_auth_no_creds() && ok;
+  ok = test_basic_auth_bad_creds() && ok;
+  ok = test_basic_auth_valid_creds() && ok;
+  ok = test_domain_blacklist_block() && ok;
+  ok = test_url_blacklist_block() && ok;
+  ok = test_domain_whitelist_allow() && ok;
+  ok = test_default_block_non_whitelisted() && ok;
+  ok = test_blacklist_over_whitelist() && ok;
+  ok = test_portal_redirect_browser() && ok;
+  ok = test_portal_no_redirect_for_script() && ok;
+  ok = test_portal_cookie_valid() && ok;
+  ok = test_portal_cookie_expired() && ok;
+  ok = test_auth_pass_policy_block() && ok;
+  ok = test_connect_auth_required() && ok;
+  ok = test_connect_tunnel_no_mitm() && ok;
 
   std::cout << "\n";
   if (ok) {
