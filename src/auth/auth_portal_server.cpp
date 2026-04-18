@@ -256,6 +256,14 @@ std::string login_page_html(const std::string& return_to, const std::string& err
      << "background:#24456e;color:#fff;font-weight:600;cursor:pointer;}"
      << ".error{margin-top:12px;padding:10px 12px;border-radius:10px;background:#3b1418;color:#ffced3;}"
      << ".meta{margin-top:14px;color:#8ea3bf;font-size:12px;word-break:break-all;}"
+     << ".pw-wrap{position:relative;margin-top:8px;}"
+     << ".pw-wrap input{width:100%;box-sizing:border-box;padding:12px 14px;padding-right:42px;margin-top:0;"
+     << "border-radius:12px;border:1px solid #2f4f75;background:#0c1828;color:#eef4ff;}"
+     << ".pw-toggle{position:absolute;right:8px;top:50%;transform:translateY(-50%);"
+     << "width:28px;height:28px;border:none;background:transparent;color:#8ea3bf;"
+     << "cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;"
+     << "border-radius:50%;transition:color .2s;}"
+     << ".pw-toggle:hover{color:#eef4ff;}"
      << "</style></head><body><div class=\"card\"><h1>OpenScanProxy 认证</h1>"
      << "<p>登录成功后，浏览器会为当前访问站点建立代理认证 cookie，后续访问同域名时无需重复输入用户名和密码。</p>";
   if (!error.empty()) {
@@ -267,7 +275,9 @@ std::string login_page_html(const std::string& return_to, const std::string& err
   os << "<form method=\"post\" action=\"/login\">"
      << "<input type=\"hidden\" name=\"return_to\" value=\"" << html_escape(return_to) << "\">"
      << "<label>用户名<input name=\"username\" autocomplete=\"username\"></label>"
-     << "<label>密码<input name=\"password\" type=\"password\" autocomplete=\"current-password\"></label>"
+     << "<label>密码<div class=\"pw-wrap\"><input id=\"pw\" name=\"password\" type=\"password\" autocomplete=\"current-password\">"
+     << "<button type=\"button\" class=\"pw-toggle\" onclick=\"var e=document.getElementById('pw');"
+     << "e.type=e.type==='password'?'text':'password';this.textContent=e.type==='password'?'👁':'✕';\">👁</button></div></label>"
      << "<button type=\"submit\">登录并继续访问</button></form>";
   if (!return_to.empty()) {
     os << "<div class=\"meta\">返回地址: " << html_escape(return_to) << "</div>";
