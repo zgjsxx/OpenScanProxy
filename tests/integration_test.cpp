@@ -82,6 +82,10 @@ struct MockUpstreamServer {
     }
     running = true;
     server_thread = std::thread([this]() { serve(); });
+
+    // 等待上游服务器启动就绪（最多 200ms）
+    // 简单方法：短暂 sleep 等待线程启动
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
 
   void serve() {
@@ -383,8 +387,10 @@ std::string base64_encode(const std::string& input) {
 // 场景 1: 无认证 HTTP GET 请求转发
 // ===================================================================
 bool test_http_get_no_auth() {
+  std::cerr << "  test_http_get_no_auth: starting..." << std::flush;
   TestProxy tp;
   tp.start(false);  // 不启用认证
+  std::cerr << " proxy started" << std::flush;
 
   // 构造 GET 请求，Host 指向上游服务器
   std::ostringstream req;
@@ -392,7 +398,9 @@ bool test_http_get_no_auth() {
       << "Host: 127.0.0.1:" << tp.upstream_port << "\r\n"
       << "Connection: close\r\n\r\n";
 
+  std::cerr << " sending request..." << std::flush;
   auto raw_resp = tp.send_raw(req.str());
+  std::cerr << " got response (" << raw_resp.size() << " bytes)" << std::flush;
   if (raw_resp.empty()) return expect(false, "http_get_no_auth: no response received");
 
   HttpResponse resp;
