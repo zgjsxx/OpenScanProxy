@@ -10,7 +10,8 @@ namespace openscanproxy::audit {
 
 AuditLogger::AuditLogger(std::string log_path, std::size_t recent_limit)
     : log_path_(std::move(log_path)), recent_limit_(recent_limit > 0 ? recent_limit : 1) {
-  std::filesystem::create_directories(std::filesystem::path(log_path_).parent_path());
+  auto parent = std::filesystem::path(log_path_).parent_path();
+  if (!parent.empty()) std::filesystem::create_directories(parent);
 }
 
 void AuditLogger::write(const AuditEvent& event) {
