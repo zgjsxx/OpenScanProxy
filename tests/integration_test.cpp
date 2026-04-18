@@ -408,7 +408,7 @@ bool test_response_chunked_trailer_roundtrip() {
       "Transfer-Encoding: chunked\r\n"
       "Trailer: X-Status\r\n"
       "\r\n"
-      "4\r\nOK!\r\n"
+      "3\r\nOK!\r\n"
       "0\r\n"
       "X-Status: complete\r\n"
       "\r\n";
