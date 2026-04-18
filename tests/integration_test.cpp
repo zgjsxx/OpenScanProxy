@@ -25,10 +25,12 @@ using openscanproxy::config::AppConfig;
 using openscanproxy::http::HttpRequest;
 using openscanproxy::http::HttpResponse;
 using openscanproxy::http::header_get;
+using openscanproxy::parse_response;
 using openscanproxy::policy::AccessAction;
 using openscanproxy::policy::PolicyConfig;
 using openscanproxy::proxy::ProxyServer;
 using openscanproxy::proxy::Runtime;
+using openscanproxy::core::split;
 
 namespace {
 
@@ -334,7 +336,7 @@ struct TestProxy {
     auto raw = send_raw(raw_request, timeout_sec);
     HttpResponse resp;
     if (!raw.empty()) {
-      http::parse_response(raw, resp);
+      parse_response(raw, resp);
     }
     return resp;
   }
@@ -381,7 +383,7 @@ bool test_http_get_no_auth() {
   if (raw_resp.empty()) return expect(false, "http_get_no_auth: no response received");
 
   HttpResponse resp;
-  if (!http::parse_response(raw_resp, resp)) return expect(false, "http_get_no_auth: failed to parse response");
+  if (!parse_response(raw_resp, resp)) return expect(false, "http_get_no_auth: failed to parse response");
 
   bool ok = true;
   ok = expect(resp.status == 200, "http_get_no_auth: status should be 200, got " + std::to_string(resp.status)) && ok;
@@ -417,7 +419,7 @@ bool test_http_post_with_body() {
   if (raw_resp.empty()) return expect(false, "http_post_with_body: no response");
 
   HttpResponse resp;
-  if (!http::parse_response(raw_resp, resp)) return expect(false, "http_post_with_body: failed to parse response");
+  if (!parse_response(raw_resp, resp)) return expect(false, "http_post_with_body: failed to parse response");
 
   bool ok = true;
   ok = expect(resp.status == 200, "http_post_with_body: status should be 200") && ok;
@@ -453,7 +455,7 @@ bool test_http_chunked_with_trailer() {
   if (raw_resp.empty()) return expect(false, "http_chunked_with_trailer: no response");
 
   HttpResponse resp;
-  if (!http::parse_response(raw_resp, resp)) return expect(false, "http_chunked_with_trailer: failed to parse response");
+  if (!parse_response(raw_resp, resp)) return expect(false, "http_chunked_with_trailer: failed to parse response");
 
   bool ok = true;
   ok = expect(resp.status == 200, "http_chunked_with_trailer: status should be 200") && ok;
@@ -483,7 +485,7 @@ bool test_http_pipeline() {
   if (raw_resp.empty()) return expect(false, "http_pipeline: no response for first request");
 
   HttpResponse resp;
-  if (!http::parse_response(raw_resp, resp)) return expect(false, "http_pipeline: failed to parse first response");
+  if (!parse_response(raw_resp, resp)) return expect(false, "http_pipeline: failed to parse first response");
 
   bool ok = expect(resp.status == 200, "http_pipeline: first request should return 200") ;
 
@@ -512,7 +514,7 @@ bool test_basic_auth_valid() {
   if (raw_resp.empty()) return expect(false, "basic_auth_valid: no response");
 
   HttpResponse resp;
-  if (!http::parse_response(raw_resp, resp)) return expect(false, "basic_auth_valid: failed to parse response");
+  if (!parse_response(raw_resp, resp)) return expect(false, "basic_auth_valid: failed to parse response");
 
   // 正确凭据应正常转发（200），而非返回 407
   bool ok = expect(resp.status == 200, "basic_auth_valid: status should be 200, got " + std::to_string(resp.status));
@@ -540,7 +542,7 @@ bool test_basic_auth_invalid() {
   if (raw_resp.empty()) return expect(false, "basic_auth_invalid: no response");
 
   HttpResponse resp;
-  if (!http::parse_response(raw_resp, resp)) return expect(false, "basic_auth_invalid: failed to parse response");
+  if (!parse_response(raw_resp, resp)) return expect(false, "basic_auth_invalid: failed to parse response");
 
   return expect(resp.status == 407, "basic_auth_invalid: status should be 407, got " + std::to_string(resp.status));
 }
@@ -561,7 +563,7 @@ bool test_basic_auth_none() {
   if (raw_resp.empty()) return expect(false, "basic_auth_none: no response");
 
   HttpResponse resp;
-  if (!http::parse_response(raw_resp, resp)) return expect(false, "basic_auth_none: failed to parse response");
+  if (!parse_response(raw_resp, resp)) return expect(false, "basic_auth_none: failed to parse response");
 
   return expect(resp.status == 407, "basic_auth_none: status should be 407, got " + std::to_string(resp.status));
 }
@@ -587,7 +589,7 @@ bool test_portal_cookie_valid() {
   if (raw_resp.empty()) return expect(false, "portal_cookie_valid: no response");
 
   HttpResponse resp;
-  if (!http::parse_response(raw_resp, resp)) return expect(false, "portal_cookie_valid: failed to parse response");
+  if (!parse_response(raw_resp, resp)) return expect(false, "portal_cookie_valid: failed to parse response");
 
   bool ok = expect(resp.status == 200, "portal_cookie_valid: status should be 200, got " + std::to_string(resp.status));
   ok = expect(std::string(resp.body.begin(), resp.body.end()) == "upstream-ok",
@@ -621,7 +623,7 @@ bool test_portal_cookie_expired() {
   if (raw_resp.empty()) return expect(false, "portal_cookie_expired: no response");
 
   HttpResponse resp;
-  if (!http::parse_response(raw_resp, resp)) return expect(false, "portal_cookie_expired: failed to parse response");
+  if (!parse_response(raw_resp, resp)) return expect(false, "portal_cookie_expired: failed to parse response");
 
   // 过期 Cookie + 浏览器请求 → 302 重定向到 Portal 或 403
   bool ok = expect(resp.status == 302 || resp.status == 403,
@@ -648,7 +650,7 @@ bool test_portal_redirect_browser() {
   if (raw_resp.empty()) return expect(false, "portal_redirect_browser: no response");
 
   HttpResponse resp;
-  if (!http::parse_response(raw_resp, resp)) return expect(false, "portal_redirect_browser: failed to parse response");
+  if (!parse_response(raw_resp, resp)) return expect(false, "portal_redirect_browser: failed to parse response");
 
   bool ok = expect(resp.status == 302, "portal_redirect_browser: status should be 302, got " + std::to_string(resp.status));
   auto location = header_get(resp.headers, "Location");
@@ -678,7 +680,7 @@ bool test_domain_blacklist_block() {
   if (raw_resp.empty()) return expect(false, "domain_blacklist_block: no response");
 
   HttpResponse resp;
-  if (!http::parse_response(raw_resp, resp)) return expect(false, "domain_blacklist_block: failed to parse response");
+  if (!parse_response(raw_resp, resp)) return expect(false, "domain_blacklist_block: failed to parse response");
 
   bool ok = expect(resp.status == 403, "domain_blacklist_block: status should be 403, got " + std::to_string(resp.status));
   auto body_str = std::string(resp.body.begin(), resp.body.end());
@@ -711,7 +713,7 @@ bool test_url_blacklist_block() {
   if (raw_resp.empty()) return expect(false, "url_blacklist_block: no response");
 
   HttpResponse resp;
-  if (!http::parse_response(raw_resp, resp)) return expect(false, "url_blacklist_block: failed to parse response");
+  if (!parse_response(raw_resp, resp)) return expect(false, "url_blacklist_block: failed to parse response");
 
   return expect(resp.status == 403, "url_blacklist_block: status should be 403, got " + std::to_string(resp.status));
 }
@@ -736,7 +738,7 @@ bool test_domain_whitelist_allow() {
   if (raw_resp.empty()) return expect(false, "domain_whitelist_allow: no response");
 
   HttpResponse resp;
-  if (!http::parse_response(raw_resp, resp)) return expect(false, "domain_whitelist_allow: failed to parse response");
+  if (!parse_response(raw_resp, resp)) return expect(false, "domain_whitelist_allow: failed to parse response");
 
   bool ok = expect(resp.status == 200, "domain_whitelist_allow: whitelisted domain should return 200, got " + std::to_string(resp.status));
   ok = expect(std::string(resp.body.begin(), resp.body.end()) == "upstream-ok",
@@ -815,7 +817,7 @@ bool test_connect_tunnel_auth_required() {
   HttpResponse resp;
   // 代理的 407 响应可能不是标准 HTTP 响应格式（直接发送的字符串）
   // 尝试解析，如果失败则直接检查原始内容
-  if (http::parse_response(raw_resp, resp)) {
+  if (parse_response(raw_resp, resp)) {
     return expect(resp.status == 407, "connect_tunnel_auth_required: status should be 407, got " + std::to_string(resp.status));
   }
   // 直接检查原始响应内容
@@ -843,7 +845,7 @@ bool test_portal_no_redirect_for_script() {
   if (raw_resp.empty()) return expect(false, "portal_no_redirect_script: no response");
 
   HttpResponse resp;
-  if (!http::parse_response(raw_resp, resp)) return expect(false, "portal_no_redirect_script: failed to parse response");
+  if (!parse_response(raw_resp, resp)) return expect(false, "portal_no_redirect_script: failed to parse response");
 
   // 子资源请求不应返回 302 重定向到 Portal
   // 应返回 403（Portal Auth Required）或 407（Basic fallback）
@@ -874,7 +876,7 @@ bool test_auth_pass_but_policy_block() {
   if (raw_resp.empty()) return expect(false, "auth_pass_policy_block: no response");
 
   HttpResponse resp;
-  if (!http::parse_response(raw_resp, resp)) return expect(false, "auth_pass_policy_block: failed to parse response");
+  if (!parse_response(raw_resp, resp)) return expect(false, "auth_pass_policy_block: failed to parse response");
 
   // 认证通过但策略应拦截 → 403
   return expect(resp.status == 403, "auth_pass_policy_block: status should be 403, got " + std::to_string(resp.status));
@@ -901,7 +903,7 @@ bool test_policy_blacklist_over_whitelist() {
   if (raw_resp.empty()) return expect(false, "policy_blacklist_over_whitelist: no response");
 
   HttpResponse resp;
-  if (!http::parse_response(raw_resp, resp)) return expect(false, "policy_blacklist_over_whitelist: failed to parse response");
+  if (!parse_response(raw_resp, resp)) return expect(false, "policy_blacklist_over_whitelist: failed to parse response");
 
   return expect(resp.status == 403, "policy_blacklist_over_whitelist: blacklist should override whitelist, got " + std::to_string(resp.status));
 }
