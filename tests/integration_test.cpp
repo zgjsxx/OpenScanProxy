@@ -24,8 +24,12 @@ using openscanproxy::core::ScanResult;
 using openscanproxy::core::ScanStatus;
 using openscanproxy::http::HttpRequest;
 using openscanproxy::http::HttpResponse;
-using openscanproxy::http::parse_request;
-using openscanproxy::http::parse_response;
+using openscanproxy::header_add;
+using openscanproxy::header_get;
+using openscanproxy::parse_request;
+using openscanproxy::parse_response;
+using openscanproxy::serialize_request;
+using openscanproxy::serialize_response;
 using openscanproxy::policy::AccessAction;
 using openscanproxy::policy::AccessPolicyResult;
 using openscanproxy::policy::PolicyConfig;
@@ -89,11 +93,11 @@ bool test_basic_auth_valid_credentials() {
   HttpRequest req;
   req.method = "GET";
   req.uri = "http://example.com/";
-  http::header_add(req.headers, "Host", "example.com");
-  http::header_add(req.headers, "Proxy-Authorization", "Basic " + encoded);
+  header_add(req.headers, "Host", "example.com");
+  header_add(req.headers, "Proxy-Authorization", "Basic " + encoded);
 
   // 模拟 authenticate_proxy_request 的逻辑
-  auto auth_header = http::header_get(req.headers, "Proxy-Authorization");
+  auto auth_header = header_get(req.headers, "Proxy-Authorization");
   bool has_prefix = auth_header.rfind("Basic ", 0) == 0;
 
   return expect(rt.proxy_auth.enabled(), "basic auth enabled") &&
@@ -247,11 +251,11 @@ bool test_extractor_scanner_policy_pipeline() {
   HttpRequest req;
   req.method = "POST";
   req.uri = "/upload";
-  http::header_add(req.headers, "Host", "upload.example.com");
-  http::header_add(req.headers, "Content-Type", "multipart/form-data; boundary=boundary");
+  header_add(req.headers, "Host", "upload.example.com");
+  header_add(req.headers, "Content-Type", "multipart/form-data; boundary=boundary");
   // 提取器从 request headers 的 Content-Disposition 字段取 filename
-  http::header_add(req.headers, "Content-Disposition", "form-data; name=\"file\"; filename=\"eicar.txt\"");
-  http::header_add(req.headers, "Content-Length", std::to_string(body.size()));
+  header_add(req.headers, "Content-Disposition", "form-data; name=\"file\"; filename=\"eicar.txt\"");
+  header_add(req.headers, "Content-Length", std::to_string(body.size()));
   req.body.assign(body.begin(), body.end());
 
   // 提取文件
@@ -292,10 +296,10 @@ bool test_extractor_scanner_clean_file() {
   HttpRequest req;
   req.method = "POST";
   req.uri = "/upload";
-  http::header_add(req.headers, "Host", "upload.example.com");
-  http::header_add(req.headers, "Content-Type", "multipart/form-data; boundary=boundary");
-  http::header_add(req.headers, "Content-Disposition", "form-data; name=\"file\"; filename=\"report.pdf\"");
-  http::header_add(req.headers, "Content-Length", std::to_string(body.size()));
+  header_add(req.headers, "Host", "upload.example.com");
+  header_add(req.headers, "Content-Type", "multipart/form-data; boundary=boundary");
+  header_add(req.headers, "Content-Disposition", "form-data; name=\"file\"; filename=\"report.pdf\"");
+  header_add(req.headers, "Content-Length", std::to_string(body.size()));
   req.body.assign(body.begin(), body.end());
 
   auto files = rt.extractor.from_request(req, "upload.example.com");
@@ -332,20 +336,20 @@ bool test_chunked_trailer_roundtrip() {
 
   HttpRequest req;
   std::size_t consumed = 0;
-  bool parsed = http::parse_request(raw, req, &consumed);
+  bool parsed = parse_request(raw, req, &consumed);
 
   if (!parsed) return expect(false, "chunked request with trailer parsed");
 
   // 验证 trailers
   bool has_trailer = !req.trailers.empty();
-  auto digest = http::header_get(req.trailers, "X-Digest");
+  auto digest = header_get(req.trailers, "X-Digest");
 
   // 序列化回来
-  auto serialized = http::serialize_request(req);
+  auto serialized = serialize_request(req);
 
   // 再次解析序列化后的数据
   HttpRequest req2;
-  bool parsed2 = http::parse_request(serialized, req2, &consumed);
+  bool parsed2 = parse_request(serialized, req2, &consumed);
 
   return expect(parsed, "chunked request with trailer parsed") &&
          expect(has_trailer, "trailers present") &&
@@ -410,14 +414,14 @@ bool test_response_chunked_trailer_roundtrip() {
       "\r\n";
 
   HttpResponse resp;
-  bool parsed = http::parse_response(raw, resp);
+  bool parsed = parse_response(raw, resp);
   if (!parsed) return expect(false, "chunked response with trailer parsed");
 
-  auto status_trailer = http::header_get(resp.trailers, "X-Status");
-  auto serialized = http::serialize_response(resp);
+  auto status_trailer = header_get(resp.trailers, "X-Status");
+  auto serialized = serialize_response(resp);
 
   HttpResponse resp2;
-  bool parsed2 = http::parse_response(serialized, resp2);
+  bool parsed2 = parse_response(serialized, resp2);
 
   return expect(parsed, "chunked response with trailer parsed") &&
          expect(resp.status == 200, "status code 200") &&
@@ -440,8 +444,8 @@ bool test_extractor_from_response() {
 
   HttpResponse resp;
   resp.status = 200;
-  http::header_add(resp.headers, "Content-Type", "application/pdf");
-  http::header_add(resp.headers, "Content-Disposition", "attachment; filename=\"report.pdf\"");
+  header_add(resp.headers, "Content-Type", "application/pdf");
+  header_add(resp.headers, "Content-Disposition", "attachment; filename=\"report.pdf\"");
   resp.body.assign(100, 'A');  // 100 bytes of dummy data
 
   auto files = extractor.from_response(req, resp, "download.example.com");
