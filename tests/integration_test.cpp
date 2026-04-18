@@ -25,7 +25,7 @@ using openscanproxy::config::AppConfig;
 using openscanproxy::http::HttpRequest;
 using openscanproxy::http::HttpResponse;
 using openscanproxy::http::header_get;
-using openscanproxy::parse_response;
+using openscanproxy::http::parse_response;
 using openscanproxy::policy::AccessAction;
 using openscanproxy::policy::PolicyConfig;
 using openscanproxy::proxy::ProxyServer;
@@ -254,8 +254,8 @@ struct TestProxy {
   }
 
   // 使用自定义策略配置启动
-  void start_with_policy(const PolicyConfig& policy_cfg, bool enable_auth = false) {
-    auto cfg = make_config(proxy_port, upstream_port, enable_auth);
+  void start_with_policy(const PolicyConfig& policy_cfg, bool enable_auth = false, const std::string& auth_mode = "basic") {
+    auto cfg = make_config(proxy_port, upstream_port, enable_auth, auth_mode);
     start_with_config(cfg);
     // 更新策略引擎
     runtime->policy.update(policy_cfg);
