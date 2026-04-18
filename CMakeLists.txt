@@ -100,9 +100,37 @@ if(BUILD_TESTING)
   add_test(NAME stats_test COMMAND stats_test)
   add_test(NAME util_test COMMAND util_test)
   add_test(NAME extractor_test COMMAND extractor_test)
+
+  # 集成测试：启动代理 + Mock 上游，验证端到端流程
+  # 仅在 POSIX 平台（Linux/macOS）构建，因为依赖的源文件使用了 POSIX socket API
+  if(NOT MSVC)
+    add_executable(integration_test
+      tests/integration_test.cpp
+      src/core/util.cpp
+      src/core/logger.cpp
+      src/config/config.cpp
+      src/http/http_message.cpp
+      src/extractor/extractor.cpp
+      src/scanner/mock_scanner.cpp
+      src/policy/policy.cpp
+      src/audit/audit.cpp
+      src/stats/stats.cpp
+      src/tlsmitm/tls_mitm.cpp
+      src/proxy/proxy_server.cpp
+      src/admin/admin_server.cpp
+      src/auth/auth_portal_server.cpp
+    )
+    target_include_directories(integration_test PRIVATE include)
+    target_link_libraries(integration_test PRIVATE OpenSSL::SSL OpenSSL::Crypto pthread)
+    add_test(NAME integration_test COMMAND integration_test)
+  endif()
+
   set_tests_properties(http_message_test http_protocol_test policy_test config_test stats_test util_test extractor_test PROPERTIES
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   )
+  if(NOT MSVC)
+    set_tests_properties(integration_test PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+  endif()
 endif()
 
 
