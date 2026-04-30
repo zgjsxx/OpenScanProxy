@@ -1,0 +1,10 @@
+.git/
+build/
+build-*/
+logs/
+certs/
+web/node_modules/
+web/pnpm-lock.yaml
+docker/
+*.md
+LICENSE

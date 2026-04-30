@@ -1,5 +1,5 @@
 ﻿<template>
-  <div class="app-shell">
+  <div class="app-shell" :class="{ 'app-shell--full': !showNav }">
     <aside v-if="showNav" class="sidebar">
       <div class="brand">
         <div class="brand-mark">OS</div>

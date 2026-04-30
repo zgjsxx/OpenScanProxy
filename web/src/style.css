@@ -61,6 +61,10 @@ textarea {
   grid-template-columns: 284px minmax(0, 1fr);
 }
 
+.app-shell--full {
+  grid-template-columns: 1fr;
+}
+
 .sidebar {
   position: relative;
   padding: 24px 18px;
@@ -1010,4 +1014,47 @@ pre {
   .rule-name-input {
     min-width: 100%;
   }
+}
+
+.login-card {
+  max-width: 420px;
+  margin: 80px auto 40px;
+}
+
+.login-form {
+  flex-direction: column !important;
+  align-items: stretch !important;
+}
+
+.pw-wrap {
+  position: relative;
+  display: flex;
+}
+
+.pw-wrap input {
+  width: 100%;
+  padding-right: 42px;
+}
+
+.pw-toggle {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 36px;
+  height: 36px;
+  border: none;
+  background: transparent;
+  color: #8ea4c6;
+  cursor: pointer;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  min-height: auto;
+}
+
+.pw-toggle:hover {
+  background: #1a3050;
+  color: #eef4ff;
 }
