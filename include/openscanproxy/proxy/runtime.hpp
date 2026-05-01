@@ -6,6 +6,7 @@
 #include "openscanproxy/core/util.hpp"
 #include "openscanproxy/extractor/extractor.hpp"
 #include "openscanproxy/policy/policy.hpp"
+#include "openscanproxy/policy/policy_store.hpp"
 #include "openscanproxy/scanner/scanner.hpp"
 #include "openscanproxy/stats/stats.hpp"
 #include "openscanproxy/tlsmitm/tls_mitm.hpp"
@@ -48,6 +49,14 @@ class ProxyAuthStore {
     if (user.empty() || password.empty()) return false;
     std::lock_guard<std::mutex> lk(mu_);
     users_[user] = password;
+    persist_to_file_locked();
+    return true;
+  }
+
+  bool remove_user(const std::string& user) {
+    if (user.empty()) return false;
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!users_.erase(user)) return false;
     persist_to_file_locked();
     return true;
   }
@@ -608,6 +617,7 @@ struct Runtime {
   audit::AuditLogger audit;
   stats::StatsRegistry stats;
   tlsmitm::TLSMitmEngine tls_mitm;
+  policy::PolicyStore* policy_store{nullptr};  // non-owning, set by main()
 
   explicit Runtime(config::AppConfig cfg)
       : config(std::move(cfg)),

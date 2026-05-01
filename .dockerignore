@@ -6,5 +6,6 @@ certs/
 web/node_modules/
 web/pnpm-lock.yaml
 docker/
+!docker/entrypoint.sh
 *.md
 LICENSE

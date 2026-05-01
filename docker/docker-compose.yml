@@ -1,4 +1,19 @@
 services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: openscanproxy
+      POSTGRES_USER: osp
+      POSTGRES_PASSWORD: osp123
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U osp -d openscanproxy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   openscanproxy:
     build:
       context: ..
@@ -6,8 +21,21 @@ services:
     ports:
       - "28080:8080"
       - "29090:9090"
+      - "29091:9091"
+    environment:
+      OSPROXY_DB_HOST: postgres
+      OSPROXY_DB_PORT: "5432"
+      OSPROXY_DB_NAME: openscanproxy
+      OSPROXY_DB_USER: osp
+      OSPROXY_DB_PASSWORD: osp123
     volumes:
       - ../configs:/app/configs
       - ../logs:/app/logs
       - ../certs:/app/certs
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
+
+volumes:
+  pgdata:

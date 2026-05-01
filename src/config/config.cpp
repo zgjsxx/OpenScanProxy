@@ -2,6 +2,7 @@
 
 #include "openscanproxy/core/util.hpp"
 
+#include <cstdlib>
 #include <fstream>
 #include <optional>
 #include <regex>
@@ -193,6 +194,21 @@ AppConfig ConfigLoader::load_from_file(const std::string& path) {
   GET_U64("proxy_auth_portal_session_ttl_sec", proxy_auth_portal_session_ttl_sec);
   GET_S("proxy_auth_signing_key", proxy_auth_signing_key);
   GET_S("domain_category_data_file", domain_category_data_file);
+
+  GET_S("db_host", db_host);
+  GET_U16("db_port", db_port);
+  GET_S("db_name", db_name);
+  GET_S("db_user", db_user);
+  GET_S("db_password", db_password);
+
+  // 环境变量覆盖数据库连接参数
+  if (const char* ev = std::getenv("OSPROXY_DB_HOST")) cfg.db_host = ev;
+  if (const char* ev = std::getenv("OSPROXY_DB_PORT")) {
+    try { cfg.db_port = static_cast<uint16_t>(std::stoi(ev)); } catch (...) {}
+  }
+  if (const char* ev = std::getenv("OSPROXY_DB_NAME")) cfg.db_name = ev;
+  if (const char* ev = std::getenv("OSPROXY_DB_USER")) cfg.db_user = ev;
+  if (const char* ev = std::getenv("OSPROXY_DB_PASSWORD")) cfg.db_password = ev;
 
   cfg.allowed_mime = parse_string_array(text, "allowed_mime");
   cfg.allowed_extensions = parse_string_array(text, "allowed_extensions");

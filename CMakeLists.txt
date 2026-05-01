@@ -11,6 +11,7 @@ if(MSVC)
 endif()
 
 find_package(OpenSSL REQUIRED)
+find_package(PostgreSQL REQUIRED)
 include(CTest)
 
 add_executable(openscanproxy
@@ -23,6 +24,7 @@ add_executable(openscanproxy
   src/scanner/mock_scanner.cpp
   src/scanner/clamav_scanner.cpp
   src/policy/policy.cpp
+  src/policy/policy_store.cpp
   src/audit/audit.cpp
   src/stats/stats.cpp
   src/tlsmitm/tls_mitm.cpp
@@ -32,7 +34,7 @@ add_executable(openscanproxy
 )
 
 target_include_directories(openscanproxy PRIVATE include)
-target_link_libraries(openscanproxy PRIVATE OpenSSL::SSL OpenSSL::Crypto pthread)
+target_link_libraries(openscanproxy PRIVATE OpenSSL::SSL OpenSSL::Crypto PostgreSQL::PostgreSQL pthread)
 
 set(ADMIN_STATIC_DIR_DEFAULT "${CMAKE_SOURCE_DIR}/web/dist" CACHE PATH "Default admin static asset directory")
 message(STATUS "Admin static assets directory: ${ADMIN_STATIC_DIR_DEFAULT}")
@@ -101,8 +103,8 @@ if(BUILD_TESTING)
   add_test(NAME util_test COMMAND util_test)
   add_test(NAME extractor_test COMMAND extractor_test)
 
-  # ¼¯³É²âÊÔ£ºÕæÕýÆô¶¯ ProxyServer£¬²¢Í¨¹ý socket ÑéÖ¤´úÀí¼¶Ö÷Á´Â·¡£
-  # ÕâÌ×²âÊÔÒÀÀµ POSIX socket API£¬Òò´Ë½öÔÚ·Ç MSVC Æ½Ì¨¹¹½¨¡£
+  # ï¿½ï¿½ï¿½É²ï¿½ï¿½Ô£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ProxyServerï¿½ï¿½ï¿½ï¿½Í¨ï¿½ï¿½ socket ï¿½ï¿½Ö¤ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Â·ï¿½ï¿½
+  # ï¿½ï¿½ï¿½×²ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ POSIX socket APIï¿½ï¿½ï¿½ï¿½Ë½ï¿½ï¿½Ú·ï¿½ MSVC Æ½Ì¨ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
   if(NOT MSVC)
     add_executable(integration_test
       tests/integration_test.cpp

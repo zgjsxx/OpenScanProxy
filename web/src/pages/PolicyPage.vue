@@ -21,10 +21,6 @@
           <span class="metric-label">故障处理</span>
           <strong>{{ policy.fail_open ? 'Fail-open' : 'Fail-close' }}</strong>
         </div>
-        <div class="metric-tile">
-          <span class="metric-label">认证用户</span>
-          <strong>{{ proxyUsers.users.length }}</strong>
-        </div>
       </div>
     </section>
 
@@ -234,58 +230,7 @@
         </div>
         <pre v-if="policyTestResult" class="result-panel">{{ policyTestResult }}</pre>
       </section>
-
-      <section class="card section-shell compact-card">
-        <div class="section-head">
-          <div>
-            <div class="section-kicker">Proxy Authentication</div>
-            <div class="section-title">代理认证用户管理</div>
-          </div>
-          <p class="muted section-note">首次访问代理时，浏览器会提示输入这里创建的用户名和密码。</p>
-        </div>
-
-        <div class="auth-state">
-          <span class="status-chip" :class="proxyUsers.enabled ? 'ok' : 'off'">
-            {{ proxyUsers.enabled ? '已启用认证' : '未启用认证' }}
-          </span>
-          <span class="muted">当前共 {{ proxyUsers.users.length }} 个账号。</span>
-        </div>
-
-        <div class="proxy-user-form">
-          <label class="field-block">
-            <span>用户名</span>
-            <input v-model="newProxyUser.username" placeholder="请输入用户名" />
-          </label>
-          <label class="field-block">
-            <span>密码</span>
-            <input v-model="newProxyUser.password" placeholder="请输入密码" type="password" />
-          </label>
-        </div>
-
-        <div class="action-row split">
-          <span
-            class="status-text"
-            :class="{
-              success: proxyUserMessage && proxyUserMessage.includes('成功'),
-              error: proxyUserMessage && proxyUserMessage.includes('失败'),
-            }"
-          >
-            {{ proxyUserMessage || '支持创建新用户，也支持用同名账号进行密码更新。' }}
-          </span>
-          <button class="primary-btn" @click="createProxyUser">创建或更新用户</button>
-        </div>
-
-        <div class="user-list-panel">
-          <div class="user-list-title">已配置账号</div>
-          <div v-if="proxyUsers.users.length" class="user-chip-list">
-            <span v-for="u in proxyUsers.users" :key="u.username" class="user-chip">{{ u.username }}</span>
-          </div>
-          <div v-else class="muted">当前还没有配置代理认证用户。</div>
-        </div>
-      </section>
     </div>
-
-    <SystemConfig :config="config" />
   </div>
 </template>
 
@@ -294,14 +239,11 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { getJson, postJson } from '../api'
 import PolicySwitch from '../components/PolicySwitch.vue'
-import SystemConfig from '../components/SystemConfig.vue'
 
 const router = useRouter()
 const policy = ref({ fail_open: false, block_suspicious: false })
-const config = ref({})
 const policyMessage = ref('')
 const accessMessage = ref('')
-const proxyUserMessage = ref('')
 const accessForm = ref({
   domain_whitelist: '',
   domain_blacklist: '',
@@ -316,8 +258,6 @@ const accessForm = ref({
 const accessRules = ref([])
 const policyTest = ref({ user: '', host: '', url: '/', method: 'GET' })
 const policyTestResult = ref('')
-const proxyUsers = ref({ enabled: false, users: [] })
-const newProxyUser = ref({ username: '', password: '' })
 
 const defaultActionLabel = computed(() =>
   accessForm.value.default_access_action === 'block' ? '默认阻断' : '默认放行'
@@ -366,9 +306,7 @@ function serializeRules() {
 async function load() {
   try {
     policy.value = await getJson('/api/policy')
-    config.value = await getJson('/api/config')
     const access = await getJson('/api/access-policy')
-    proxyUsers.value = await getJson('/api/proxy-users')
     accessForm.value = {
       domain_whitelist: (access.domain_whitelist || []).join('\n'),
       domain_blacklist: (access.domain_blacklist || []).join('\n'),
@@ -423,17 +361,6 @@ async function runPolicyTest() {
     policyTestResult.value = JSON.stringify(resp, null, 2)
   } catch {
     policyTestResult.value = '测试失败'
-  }
-}
-
-async function createProxyUser() {
-  try {
-    await postJson('/api/proxy-users', newProxyUser.value)
-    newProxyUser.value = { username: '', password: '' }
-    proxyUserMessage.value = '代理认证用户保存成功'
-    await load()
-  } catch {
-    proxyUserMessage.value = '代理认证用户保存失败'
   }
 }
 

@@ -191,7 +191,19 @@ std::string config_to_json(const proxy::Runtime& runtime) {
   os << "\"policy_mode\":\"" << (p.fail_open ? "fail-open" : "fail-close") << "\",";
   os << "\"suspicious_action\":\"" << (p.block_suspicious ? "block" : "log") << "\",";
   os << "\"proxy_auth_enabled\":" << (runtime.proxy_auth.enabled() ? "true" : "false") << ",";
+  os << "\"proxy_auth_mode\":\"" << core::json_escape(c.proxy_auth_mode) << "\",";
   os << "\"proxy_users_file\":\"" << core::json_escape(c.proxy_users_file) << "\"";
+  os << "}";
+  return os.str();
+}
+
+std::string auth_config_to_json(const proxy::Runtime& runtime) {
+  const auto& c = runtime.config;
+  std::ostringstream os;
+  os << "{";
+  os << "\"enable_proxy_auth\":" << (runtime.proxy_auth.enabled() ? "true" : "false") << ",";
+  os << "\"proxy_auth_mode\":\"" << core::json_escape(c.proxy_auth_mode) << "\",";
+  os << "\"enable_https_mitm\":" << (c.enable_https_mitm ? "true" : "false");
   os << "}";
   return os.str();
 }
@@ -432,6 +444,30 @@ void AdminServer::run() {
         resp = http_resp(200, "OK", stats_to_json(runtime_.stats.snapshot()), "application/json");
       } else if (pure_path == "/api/config") {
         resp = http_resp(200, "OK", config_to_json(runtime_), "application/json");
+      } else if (pure_path == "/api/auth-config" && method == "GET") {
+        resp = http_resp(200, "OK", auth_config_to_json(runtime_), "application/json");
+      } else if (pure_path == "/api/auth-config" && method == "POST") {
+        auto kv = core::parse_simple_json_object(get_body(req));
+        if (kv.count("enable_proxy_auth")) {
+          bool en = kv["enable_proxy_auth"] == "true";
+          runtime_.config.enable_proxy_auth = en;
+          runtime_.proxy_auth.set_enabled(en);
+        }
+        if (kv.count("proxy_auth_mode")) {
+          const auto& mode = kv["proxy_auth_mode"];
+          if (mode == "basic" || mode == "portal" || mode == "hybrid") {
+            runtime_.config.proxy_auth_mode = mode;
+          }
+        }
+        if (kv.count("enable_https_mitm")) {
+          runtime_.config.enable_https_mitm = kv["enable_https_mitm"] == "true";
+        }
+        if (runtime_.policy_store) {
+          runtime_.policy_store->save_auth_config(
+              runtime_.config.enable_proxy_auth, runtime_.config.proxy_auth_mode,
+              runtime_.config.enable_https_mitm);
+        }
+        resp = http_resp(200, "OK", auth_config_to_json(runtime_), "application/json");
       } else if (pure_path == "/api/proxy-users" && method == "GET") {
         resp = http_resp(200, "OK", proxy_users_to_json(runtime_), "application/json");
       } else if (pure_path == "/api/proxy-users" && method == "POST") {
@@ -443,6 +479,14 @@ void AdminServer::run() {
         } else {
           runtime_.proxy_auth.set_enabled(true);
           runtime_.config.enable_proxy_auth = true;
+          resp = http_resp(200, "OK", "{\"ok\":true}", "application/json");
+        }
+      } else if (pure_path == "/api/proxy-users" && method == "DELETE") {
+        auto kv = core::parse_simple_json_object(get_body(req));
+        auto username = kv.count("username") ? core::trim(kv.at("username")) : "";
+        if (!runtime_.proxy_auth.remove_user(username)) {
+          resp = http_resp(400, "Bad Request", "{\"ok\":false,\"error\":\"user not found\"}", "application/json");
+        } else {
           resp = http_resp(200, "OK", "{\"ok\":true}", "application/json");
         }
       } else if (pure_path == "/api/logs") {
@@ -462,6 +506,19 @@ void AdminServer::run() {
         runtime_.policy.update(p);
         runtime_.config.policy_mode = p.fail_open ? "fail-open" : "fail-close";
         runtime_.config.suspicious_action = p.block_suspicious ? "block" : "log";
+        // Persist to database
+        if (runtime_.policy_store) {
+          policy::PolicyStore::ScanPolicy sp;
+          sp.fail_open = p.fail_open;
+          sp.block_suspicious = p.block_suspicious;
+          sp.scan_upload = runtime_.config.scan_upload;
+          sp.scan_download = runtime_.config.scan_download;
+          sp.max_scan_file_size = runtime_.config.max_scan_file_size;
+          sp.scan_timeout_ms = runtime_.config.scan_timeout_ms;
+          sp.allowed_mime = runtime_.config.allowed_mime;
+          sp.allowed_extensions = runtime_.config.allowed_extensions;
+          runtime_.policy_store->save_scan_policy(sp);
+        }
         resp = http_resp(200, "OK", "{\"ok\":true}", "application/json");
       } else if (pure_path == "/api/access-policy" && method == "GET") {
         resp = http_resp(200, "OK", access_policy_to_json(runtime_), "application/json");
@@ -498,6 +555,10 @@ void AdminServer::run() {
         runtime_.config.url_category_blacklist = p.url_category_blacklist;
         runtime_.config.access_rules = p.access_rules;
         runtime_.config.default_access_action = policy::to_string(p.default_access_action);
+        // Persist to database
+        if (runtime_.policy_store) {
+          runtime_.policy_store->save_policy(p);
+        }
         resp = http_resp(200, "OK", access_policy_to_json(runtime_), "application/json");
       } else if (pure_path == "/api/policy/test" && method == "POST") {
         auto body = get_body(req);

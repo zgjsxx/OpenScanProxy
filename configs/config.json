@@ -51,5 +51,10 @@
   "proxy_auth_token_ttl_sec": 120,
   "proxy_auth_portal_session_ttl_sec": 3600,
   "proxy_auth_signing_key": "change-me",
-  "domain_category_data_file": "./configs/domain_categories.csv"
+  "domain_category_data_file": "./configs/domain_categories.csv",
+  "db_host": "127.0.0.1",
+  "db_port": 5432,
+  "db_name": "openscanproxy",
+  "db_user": "osp",
+  "db_password": "osp123"
 }

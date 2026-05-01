@@ -6,7 +6,7 @@
   "admin_static_dir": "./web/dist",
   "ca_cert_path": "./certs/ca.crt",
   "ca_key_path": "./certs/ca.key",
-  "enable_https_mitm": false,
+  "enable_https_mitm": true,
   "tls_leaf_cache_enabled": true,
   "tls_leaf_cache_dir": "./certs/cache",
   "scan_upload": true,
@@ -51,5 +51,10 @@
   "proxy_auth_token_ttl_sec": 120,
   "proxy_auth_portal_session_ttl_sec": 3600,
   "proxy_auth_signing_key": "change-me",
-  "domain_category_data_file": "./configs/domain_categories.csv"
+  "domain_category_data_file": "./configs/domain_categories.csv",
+  "db_host": "127.0.0.1",
+  "db_port": 5432,
+  "db_name": "openscanproxy",
+  "db_user": "osp",
+  "db_password": "osp123"
 }

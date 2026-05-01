@@ -764,7 +764,8 @@ void ProxyServer::handle_connect_tunnel(int cfd, const std::string& target, cons
   auto start = std::chrono::steady_clock::now();
   auto [host, port] = split_host_port(target, 443);
   const auto portal_target = target_is_portal_endpoint(runtime_, host, port);
-  if (runtime_.config.enable_proxy_auth && !portal_target && user.empty() && !runtime_.config.enable_https_mitm) {
+  // Basic auth without MITM: send 407 Proxy-Authenticate (CONNECT tunnels can only carry Proxy-Authorization)
+  if (runtime_.proxy_basic_enabled() && !portal_target && user.empty() && !runtime_.config.enable_https_mitm) {
     auto response = make_proxy_auth_required_response();
     send(cfd, response.data(), response.size(), 0);
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
@@ -775,6 +776,7 @@ void ProxyServer::handle_connect_tunnel(int cfd, const std::string& target, cons
     runtime_.audit.write(denied);
     return;
   }
+  // Portal mode without MITM for unauthenticated users: the smart MITM decision below will force interception
   policy::AccessPolicyResult access;
   if (!portal_target) {
     access = runtime_.policy.evaluate_access(host, target, "CONNECT", user);
@@ -804,11 +806,21 @@ void ProxyServer::handle_connect_tunnel(int cfd, const std::string& target, cons
 
   std::string ok = "HTTP/1.1 200 Connection Established\r\n\r\n";
   send(cfd, ok.data(), ok.size(), 0);
+
+  bool use_mitm = false;
+  if (runtime_.portal_auth_enabled() && !portal_target) {
+    auto client_ip = client_ip_from_addr(client_addr);
+    auto portal_user = runtime_.portal_client_auth.lookup_user(client_ip);
+    use_mitm = portal_user.empty();
+  } else if (runtime_.config.enable_https_mitm && !portal_target) {
+    use_mitm = true;
+  }
+
   auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
   runtime_.audit.write(make_access_event(core::now_iso8601(), client_addr, host, target, "CONNECT", 200, ms, 0, ok.size(),
-                                         runtime_.config.enable_https_mitm && !portal_target, user));
+                                         use_mitm, user));
 
-  if (!runtime_.config.enable_https_mitm || portal_target) {
+  if (!use_mitm) {
     relay_bidirectional(cfd, sfd);
     close(sfd);
     return;
@@ -869,6 +881,8 @@ void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host,
         if (cookie_it != cookies.end()) {
           resolved_user = runtime_.validate_proxy_auth_cookie(cookie_it->second, host);
           if (!resolved_user.empty()) {
+            auto client_ip = client_ip_from_addr(client_addr);
+            runtime_.portal_client_auth.upsert(client_ip, resolved_user, runtime_.config.proxy_auth_portal_session_ttl_sec);
             runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, resolved_user, "allow", "proxy_portal_cookie"));
           }
         }
@@ -878,6 +892,8 @@ void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host,
         if (!auth_token.empty()) {
           auto token_user = runtime_.domain_tokens.consume(auth_token, host);
           if (!token_user.empty()) {
+            auto client_ip = client_ip_from_addr(client_addr);
+            runtime_.portal_client_auth.upsert(client_ip, token_user, runtime_.config.proxy_auth_portal_session_ttl_sec);
             auto response = make_domain_cookie_response(runtime_, absolute_url, host, token_user, true);
             ssl_write_all(client_ssl, response.data(), response.size());
             runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, token_user, "allow", "proxy_portal_token"));
@@ -1118,6 +1134,8 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
       if (cookie_it != cookies.end()) {
         resolved_user = runtime_.validate_proxy_auth_cookie(cookie_it->second, host);
         if (!resolved_user.empty()) {
+          auto client_ip = client_ip_from_addr(client_addr);
+          runtime_.portal_client_auth.upsert(client_ip, resolved_user, runtime_.config.proxy_auth_portal_session_ttl_sec);
           runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, resolved_user, "allow", "proxy_portal_cookie"));
         }
       }
@@ -1127,6 +1145,8 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
       if (!auth_token.empty()) {
         auto token_user = runtime_.domain_tokens.consume(auth_token, host);
         if (!token_user.empty()) {
+          auto client_ip = client_ip_from_addr(client_addr);
+          runtime_.portal_client_auth.upsert(client_ip, token_user, runtime_.config.proxy_auth_portal_session_ttl_sec);
           auto response = make_domain_cookie_response(runtime_, absolute_url, host, token_user, secure_cookie);
           send(cfd, response.data(), response.size(), 0);
           runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, token_user, "allow", "proxy_portal_token"));

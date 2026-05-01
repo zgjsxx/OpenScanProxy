@@ -90,6 +90,13 @@ struct AppConfig {
 
   // --- URL 分类 ---
   std::string domain_category_data_file{"./configs/domain_categories.csv"}; // 域名分类数据文件
+
+  // --- 数据库 ---
+  std::string db_host{"127.0.0.1"};           // 数据库主机
+  uint16_t db_port{5432};                      // 数据库端口
+  std::string db_name{"openscanproxy"};        // 数据库名称
+  std::string db_user{"osp"};                  // 数据库用户名
+  std::string db_password{"osp123"};           // 数据库密码
 };
 
 // 配置加载器，从 JSON 文件读取并解析为 AppConfig
