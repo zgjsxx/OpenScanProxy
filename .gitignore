@@ -7,3 +7,6 @@ build-vs/
 web/dist/
 web/node_modules/
 web/pnpm-lock.yaml
+configs/portal_sessions.json
+configs/portal_client_auth_cache.json
+.claude/
