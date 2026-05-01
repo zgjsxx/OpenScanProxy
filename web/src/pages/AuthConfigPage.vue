@@ -33,16 +33,6 @@
             Portal 模式需要独立 HTTPS 端口（9091）监听。如果启动时未启用 Portal，保存后需重启服务才能生效。
           </p>
         </div>
-        <div class="auth-config-item">
-          <label class="field-block">
-            <span>HTTPS 解密（MITM）</span>
-            <select v-model="authConfig.enable_https_mitm" class="native-select">
-              <option :value="false">关闭</option>
-              <option :value="true">开启</option>
-            </select>
-          </label>
-          <p class="muted field-hint">开启后可对 HTTPS 流量进行扫描和 Portal 认证拦截。关闭后 HTTPS 仅做隧道转发。Portal 模式下未认证用户会自动触发 MITM。</p>
-        </div>
       </div>
 
       <div class="action-row split">

@@ -808,12 +808,12 @@ void ProxyServer::handle_connect_tunnel(int cfd, const std::string& target, cons
   send(cfd, ok.data(), ok.size(), 0);
 
   bool use_mitm = false;
-  if (runtime_.portal_auth_enabled() && !portal_target) {
+  if (runtime_.config.enable_https_mitm && !portal_target) {
+    use_mitm = true;
+  } else if (runtime_.portal_auth_enabled() && !portal_target) {
     auto client_ip = client_ip_from_addr(client_addr);
     auto portal_user = runtime_.portal_client_auth.lookup_user(client_ip);
     use_mitm = portal_user.empty();
-  } else if (runtime_.config.enable_https_mitm && !portal_target) {
-    use_mitm = true;
   }
 
   auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();

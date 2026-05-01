@@ -444,6 +444,14 @@ void AdminServer::run() {
         resp = http_resp(200, "OK", stats_to_json(runtime_.stats.snapshot()), "application/json");
       } else if (pure_path == "/api/config") {
         resp = http_resp(200, "OK", config_to_json(runtime_), "application/json");
+      } else if (pure_path == "/api/ca-cert" && method == "GET") {
+        auto ca_data = read_file(runtime_.config.ca_cert_path);
+        if (ca_data.empty()) {
+          resp = http_resp(404, "Not Found", "{\"error\":\"CA certificate not found\"}", "application/json");
+        } else {
+          resp = http_resp(200, "OK", std::move(ca_data), "application/x-x509-ca-cert",
+                           "Content-Disposition: attachment; filename=\"OpenScanProxy-CA.crt\"\r\n");
+        }
       } else if (pure_path == "/api/auth-config" && method == "GET") {
         resp = http_resp(200, "OK", auth_config_to_json(runtime_), "application/json");
       } else if (pure_path == "/api/auth-config" && method == "POST") {
