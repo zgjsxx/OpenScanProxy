@@ -351,10 +351,11 @@ std::string html_escape(const std::string& in) {
 }
 
 std::string make_block_notification_response(const std::string& reason, const std::string& matched_rule = "",
-                                             const std::string& matched_type = "") {
+                                             const std::string& matched_type = "", const std::string& user = "") {
   auto escaped_reason = html_escape(reason.empty() ? "Blocked by access policy" : reason);
   auto escaped_rule = html_escape(matched_rule);
   auto escaped_type = html_escape(matched_type);
+  auto escaped_user = html_escape(user);
   std::ostringstream body;
   body << "<!doctype html><html><head><meta charset=\"utf-8\">"
        << "<title>Access Blocked</title>"
@@ -373,8 +374,11 @@ std::string make_block_notification_response(const std::string& reason, const st
        << "</style></head><body><div class=\"card\"><h1>403 Access Blocked</h1>"
        << "<h2>OpenScanProxy 拦截了当前请求</h2>"
        << "<div class=\"reason\"><strong>Reason:</strong> " << escaped_reason << "</div>";
-  if (!matched_rule.empty() || !matched_type.empty()) {
+  if (!matched_rule.empty() || !matched_type.empty() || !user.empty()) {
     body << "<div class=\"meta\">";
+    if (!user.empty()) {
+      body << "<div class=\"meta-row\"><strong>User:</strong> " << escaped_user << "</div>";
+    }
     if (!matched_rule.empty()) {
       body << "<div class=\"meta-row\"><strong>Matched Rule:</strong> " << escaped_rule << "</div>";
     }
@@ -735,7 +739,7 @@ void ProxyServer::handle_client(int cfd, const std::string& client_addr) {
     pending.erase(0, consumed);
 
     auto user = authenticate_proxy_request(runtime_.proxy_auth, headers);
-    if (runtime_.proxy_auth.enabled() && runtime_.config.proxy_auth_mode == "basic" && user.empty()) {
+    if (runtime_.proxy_auth.enabled() && runtime_.auth_mode == "basic" && user.empty()) {
       auto start = std::chrono::steady_clock::now();
       auto response = make_proxy_auth_required_response();
       send(cfd, response.data(), response.size(), 0);
@@ -765,7 +769,7 @@ void ProxyServer::handle_connect_tunnel(int cfd, const std::string& target, cons
   auto [host, port] = split_host_port(target, 443);
   const auto portal_target = target_is_portal_endpoint(runtime_, host, port);
   // Basic auth without MITM: send 407 Proxy-Authenticate (CONNECT tunnels can only carry Proxy-Authorization)
-  if (runtime_.proxy_basic_enabled() && !portal_target && user.empty() && !runtime_.config.enable_https_mitm) {
+  if (runtime_.proxy_basic_enabled() && !portal_target && user.empty() && !runtime_.mitm_enabled) {
     auto response = make_proxy_auth_required_response();
     send(cfd, response.data(), response.size(), 0);
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
@@ -777,16 +781,22 @@ void ProxyServer::handle_connect_tunnel(int cfd, const std::string& target, cons
     return;
   }
   // Portal mode without MITM for unauthenticated users: the smart MITM decision below will force interception
+  // Resolve user from portal IP cache for CONNECT policy evaluation (CONNECT has no auth headers)
+  std::string resolved_user = user;
+  if (resolved_user.empty() && runtime_.portal_auth_enabled() && !portal_target) {
+    auto client_ip = client_ip_from_addr(client_addr);
+    resolved_user = runtime_.portal_client_auth.lookup_user(client_ip);
+  }
   policy::AccessPolicyResult access;
   if (!portal_target) {
-    access = runtime_.policy.evaluate_access(host, target, "CONNECT", user);
+    access = runtime_.policy.evaluate_access(host, target, "CONNECT", resolved_user);
   }
-  if (!portal_target && access.action == policy::AccessAction::Block && !runtime_.config.enable_https_mitm) {
-    auto r = make_block_notification_response(access.reason, access.matched_rule, access.matched_type);
+  if (!portal_target && access.action == policy::AccessAction::Block && !runtime_.mitm_enabled) {
+    auto r = make_block_notification_response(access.reason, access.matched_rule, access.matched_type, resolved_user);
     send(cfd, r.data(), r.size(), 0);
     runtime_.stats.inc_blocked();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
-    auto event = make_access_event(core::now_iso8601(), client_addr, host, target, "CONNECT", 403, ms, 0, r.size(), false, user);
+    auto event = make_access_event(core::now_iso8601(), client_addr, host, target, "CONNECT", 403, ms, 0, r.size(), false, resolved_user);
     event.action = "block";
     event.rule_hit = access.matched_rule;
     event.decision_source = access.matched_type;
@@ -800,7 +810,7 @@ void ProxyServer::handle_connect_tunnel(int cfd, const std::string& target, cons
     send(cfd, fail.data(), fail.size(), 0);
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
     runtime_.audit.write(
-        make_access_event(core::now_iso8601(), client_addr, host, target, "CONNECT", 502, ms, 0, fail.size(), false, user));
+        make_access_event(core::now_iso8601(), client_addr, host, target, "CONNECT", 502, ms, 0, fail.size(), false, resolved_user));
     return;
   }
 
@@ -808,17 +818,15 @@ void ProxyServer::handle_connect_tunnel(int cfd, const std::string& target, cons
   send(cfd, ok.data(), ok.size(), 0);
 
   bool use_mitm = false;
-  if (runtime_.config.enable_https_mitm && !portal_target) {
+  if (runtime_.mitm_enabled && !portal_target) {
     use_mitm = true;
   } else if (runtime_.portal_auth_enabled() && !portal_target) {
-    auto client_ip = client_ip_from_addr(client_addr);
-    auto portal_user = runtime_.portal_client_auth.lookup_user(client_ip);
-    use_mitm = portal_user.empty();
+    use_mitm = resolved_user.empty();
   }
 
   auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
   runtime_.audit.write(make_access_event(core::now_iso8601(), client_addr, host, target, "CONNECT", 200, ms, 0, ok.size(),
-                                         use_mitm, user));
+                                         use_mitm, resolved_user));
 
   if (!use_mitm) {
     relay_bidirectional(cfd, sfd);
@@ -827,7 +835,7 @@ void ProxyServer::handle_connect_tunnel(int cfd, const std::string& target, cons
   }
 
   runtime_.stats.inc_https_mitm_requests();
-  handle_connect_mitm(cfd, sfd, host, client_addr, user);
+  handle_connect_mitm(cfd, sfd, host, client_addr, resolved_user);
 }
 
 void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host, const std::string& client_addr, const std::string& user) {
@@ -874,7 +882,7 @@ void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host,
     const auto allow_portal_redirect = should_redirect_to_portal_for_request(req.headers);
     const auto allow_client_ip_auth = should_allow_client_ip_auth_for_request(req.headers);
     const auto absolute_url = absolute_request_url(host, req.uri, true);
-    if (runtime_.config.enable_proxy_auth) {
+    if (runtime_.auth_enabled) {
       auto cookies = parse_cookie_header(http::header_get(req.headers, "Cookie"));
       if (resolved_user.empty()) {
         auto cookie_it = cookies.find(runtime_.proxy_auth_cookie_name_for_scheme(true));
@@ -976,7 +984,7 @@ void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host,
     }
     auto access = runtime_.policy.evaluate_access(host, req.uri, req.method, resolved_user);
     if (access.action == policy::AccessAction::Block) {
-      auto r = make_block_notification_response(access.reason, access.matched_rule, access.matched_type);
+      auto r = make_block_notification_response(access.reason, access.matched_rule, access.matched_type, resolved_user);
       ssl_write_all(client_ssl, r.data(), r.size());
       runtime_.stats.inc_blocked();
       auto event = make_access_event(core::now_iso8601(), client_addr, host, req.uri, req.method, 403, 0, raw_req.size(), r.size(), true, resolved_user);
@@ -993,7 +1001,7 @@ void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host,
     }
 
     for (auto& f : runtime_.extractor.from_request(req, host)) {
-      if (f.bytes.size() > runtime_.config.max_scan_file_size) continue;
+      if (f.bytes.size() > runtime_.scan_ctx.max_scan_file_size) continue;
       auto result = runtime_.scanner->scan(f, runtime_.scan_ctx);
       auto action = runtime_.policy.decide(result);
       runtime_.stats.inc_scanned_files();
@@ -1044,7 +1052,7 @@ void ProxyServer::handle_connect_mitm(int cfd, int sfd, const std::string& host,
     http::HttpResponse resp;
     if (http::parse_response(raw_resp, resp)) {
       for (auto& f : runtime_.extractor.from_response(req, resp, host)) {
-        if (f.bytes.size() > runtime_.config.max_scan_file_size) continue;
+        if (f.bytes.size() > runtime_.scan_ctx.max_scan_file_size) continue;
         auto result = runtime_.scanner->scan(f, runtime_.scan_ctx);
         auto action = runtime_.policy.decide(result);
         runtime_.stats.inc_scanned_files();
@@ -1127,7 +1135,7 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
   const auto allow_client_ip_auth = should_allow_client_ip_auth_for_request(req.headers);
   const auto absolute_url = absolute_request_url(host_h, req.uri, false);
   const auto portal_target = target_is_portal_endpoint(runtime_, host, port);
-  if (runtime_.config.enable_proxy_auth && !portal_target) {
+  if (runtime_.auth_enabled && !portal_target) {
     auto cookies = parse_cookie_header(http::header_get(req.headers, "Cookie"));
     if (resolved_user.empty()) {
       auto cookie_it = cookies.find(runtime_.proxy_auth_cookie_name_for_scheme(false));
@@ -1171,7 +1179,7 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
           runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, resolved_user, "allow", "proxy_portal_client_ip"));
         }
       }
-      if (allow_portal_redirect && (runtime_.config.proxy_auth_mode == "portal" || browser_like_request(req.headers))) {
+      if (allow_portal_redirect && (runtime_.auth_mode == "portal" || browser_like_request(req.headers))) {
         auto response = make_portal_redirect_response(runtime_, absolute_url);
         send(cfd, response.data(), response.size(), 0);
         runtime_.audit.write(make_proxy_auth_event(client_addr, host, absolute_url, "", "redirect", "proxy_auth_portal"));
@@ -1205,7 +1213,7 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
   if (!portal_target) {
     auto access = runtime_.policy.evaluate_access(host, req.uri, req.method, resolved_user);
     if (access.action == policy::AccessAction::Block) {
-      auto r = make_block_notification_response(access.reason, access.matched_rule, access.matched_type);
+      auto r = make_block_notification_response(access.reason, access.matched_rule, access.matched_type, resolved_user);
       send(cfd, r.data(), r.size(), 0);
       runtime_.stats.inc_blocked();
       auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
@@ -1219,7 +1227,7 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
     }
 
     for (auto& f : runtime_.extractor.from_request(req, host)) {
-      if (f.bytes.size() > runtime_.config.max_scan_file_size) continue;
+      if (f.bytes.size() > runtime_.scan_ctx.max_scan_file_size) continue;
       auto sha = core::sha256_hex(f.bytes);
       runtime_.stats.inc_scanned_files();
       auto result = runtime_.scanner->scan(f, runtime_.scan_ctx);
@@ -1332,7 +1340,7 @@ bool ProxyServer::handle_http_forward(int cfd, const std::string& client_addr, c
   if (!portal_target && http::parse_response(upstream, resp)) {
     final_status = resp.status;
     for (auto& f : runtime_.extractor.from_response(req, resp, host)) {
-      if (f.bytes.size() > runtime_.config.max_scan_file_size) continue;
+      if (f.bytes.size() > runtime_.scan_ctx.max_scan_file_size) continue;
       auto sha = core::sha256_hex(f.bytes);
       runtime_.stats.inc_scanned_files();
       auto result = runtime_.scanner->scan(f, runtime_.scan_ctx);

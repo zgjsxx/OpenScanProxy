@@ -15,6 +15,7 @@ enum class AccessAction { Allow, Block };
 struct AccessRule {
   std::string name;                        // 规则名称
   std::vector<std::string> users;          // 匹配的用户列表
+  std::vector<std::string> groups;         // 匹配的用户组列表
   std::vector<std::string> domain_whitelist;  // 域名白名单
   std::vector<std::string> domain_blacklist;  // 域名黑名单
   std::vector<std::string> url_whitelist;     // URL 白名单
@@ -60,10 +61,13 @@ class PolicyEngine {
   PolicyConfig config() const;
   // 动态更新策略配置
   void update(PolicyConfig cfg);
+  // 设置用户组存储（用于展开规则中的 group 引用），非 owning
+  void set_user_group_provider(void* provider) { user_groups_ = provider; }
 
  private:
   mutable std::mutex mu_;
   PolicyConfig cfg_;
+  void* user_groups_{nullptr};
 };
 
 // 枚举转字符串

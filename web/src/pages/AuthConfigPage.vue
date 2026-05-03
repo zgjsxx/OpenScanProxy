@@ -65,7 +65,35 @@
         </label>
         <label class="field-block">
           <span>密码</span>
-          <input v-model="newProxyUser.password" placeholder="请输入密码" type="password" />
+          <div class="pw-wrap">
+            <input v-model="newProxyUser.password" :type="pwShow ? 'text' : 'password'" placeholder="请输入密码" />
+            <button class="pw-toggle" type="button" @click="pwShow = !pwShow">{{ pwShow ? '隐' : '显' }}</button>
+          </div>
+        </label>
+        <label class="field-block">
+          <span>邮箱</span>
+          <input v-model="newProxyUser.email" placeholder="例如 user@company.com" />
+        </label>
+        <label class="field-block">
+          <span>角色</span>
+          <select v-model="newProxyUser.role" class="native-select">
+            <option value="user">user — 允许使用代理</option>
+            <option value="administrator">administrator — 管理控制台完全访问</option>
+            <option value="operator">operator — 管理控制台只读访问</option>
+          </select>
+        </label>
+        <label class="field-block">
+          <span>所属用户组</span>
+          <div class="user-chip-list" style="margin-top:4px">
+            <span
+              v-for="g in userGroups"
+              :key="g.name"
+              class="user-chip"
+              :class="{ selected: newProxyUser.selectedGroups.has(g.name) }"
+              @click="toggleUserGroup(g.name)"
+            >@{{ g.name }}</span>
+            <span v-if="!userGroups.length" class="muted" style="font-size:0.78rem">暂无用户组</span>
+          </div>
         </label>
       </div>
 
@@ -77,20 +105,96 @@
             error: proxyUserMessage && proxyUserMessage.includes('失败'),
           }"
         >
-          {{ proxyUserMessage || '支持创建新用户，也支持用同名账号进行密码更新。' }}
+          {{ proxyUserMessage || '同名账号将更新全部信息（密码、邮箱、角色、用户组）。' }}
         </span>
         <button class="primary-btn" @click="createProxyUser">创建或更新用户</button>
       </div>
 
       <div class="user-list-panel">
         <div class="user-list-title">已配置账号</div>
-        <div v-if="proxyUsers.users.length" class="user-chip-list">
-          <span v-for="u in proxyUsers.users" :key="u.username" class="user-chip">
-            {{ u.username }}
-            <button class="user-chip-del" title="删除用户" @click="deleteProxyUser(u.username)">x</button>
-          </span>
+        <div v-if="proxyUsers.users.length" class="user-table-wrap">
+          <table class="user-table">
+            <thead>
+              <tr>
+                <th>用户名</th>
+                <th>邮箱</th>
+                <th>角色</th>
+                <th>用户组</th>
+                <th style="width:60px"></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="u in proxyUsers.users" :key="u.username">
+                <td><strong>{{ u.username }}</strong></td>
+                <td class="muted">{{ u.email || '-' }}</td>
+                <td><span class="role-badge" :class="u.role">{{ roleLabel(u.role) }}</span></td>
+                <td>
+                  <span v-if="(u.groups || []).length" class="user-chip-list" style="gap:4px">
+                    <span v-for="g in (u.groups || [])" :key="g" class="user-chip mini-chip">@{{ g }}</span>
+                  </span>
+                  <span v-else class="muted">-</span>
+                </td>
+                <td>
+                  <button class="user-chip-del" title="删除用户" @click="deleteProxyUser(u.username)">x</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
         <div v-else class="muted">当前还没有配置代理认证用户。</div>
+      </div>
+
+      <hr class="section-divider" />
+
+      <div class="section-subhead">
+        <span>用户组管理</span>
+        <span class="muted" style="font-size:0.82rem">当前 {{ userGroups.length }} 个组</span>
+      </div>
+
+      <div class="group-form">
+        <label class="field-block" style="max-width:320px">
+          <span>组名</span>
+          <input v-model="newGroup.name" placeholder="例如 engineering" />
+        </label>
+        <div class="group-member-picker">
+          <span class="muted" style="font-size:0.82rem">选择组成员（点击切换）：</span>
+          <div class="user-chip-list" style="margin-top:6px">
+            <span
+              v-for="u in proxyUsers.users"
+              :key="u.username"
+              class="user-chip"
+              :class="{ selected: newGroup.selectedUsers.has(u.username) }"
+              @click="toggleGroupUser(u.username)"
+            >{{ u.username }}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="action-row split" style="margin-top:14px">
+        <span
+          class="status-text"
+          :class="{
+            success: groupMessage && groupMessage.includes('成功'),
+            error: groupMessage && groupMessage.includes('失败'),
+          }"
+        >
+          {{ groupMessage || '输入组名并选择用户后点击保存。' }}
+        </span>
+        <button class="primary-btn" @click="saveGroup">创建或更新用户组</button>
+      </div>
+
+      <div class="user-list-panel" v-if="userGroups.length">
+        <div class="user-list-title">已有用户组</div>
+        <div v-for="g in userGroups" :key="g.name" class="group-row">
+          <div class="group-row-head">
+            <span class="group-row-name">@{{ g.name }}</span>
+            <span class="muted" style="font-size:0.78rem">{{ (g.users || []).length }} 人</span>
+            <button class="user-chip-del" title="删除用户组" @click="deleteGroup(g.name)">x</button>
+          </div>
+          <div class="user-chip-list" style="margin-top:4px">
+            <span v-for="u in (g.users || [])" :key="u" class="user-chip">{{ u }}</span>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -107,16 +211,21 @@ import SystemConfig from '../components/SystemConfig.vue'
 const router = useRouter()
 const config = ref({})
 const proxyUsers = ref({ enabled: false, users: [] })
-const newProxyUser = ref({ username: '', password: '' })
+const newProxyUser = ref({ username: '', password: '', email: '', role: 'user', selectedGroups: new Set() })
+const pwShow = ref(false)
 const authConfig = ref({ enable_proxy_auth: false, proxy_auth_mode: 'basic', enable_https_mitm: false })
 const authConfigMessage = ref('')
 const proxyUserMessage = ref('')
+const userGroups = ref([])
+const newGroup = ref({ name: '', selectedUsers: new Set() })
+const groupMessage = ref('')
 
 async function load() {
   try {
     config.value = await getJson('/api/config')
     authConfig.value = await getJson('/api/auth-config')
     proxyUsers.value = await getJson('/api/proxy-users')
+    try { userGroups.value = await getJson('/api/user-groups') } catch {}
   } catch (e) {
     if (e.message === 'UNAUTHORIZED') router.push('/login')
   }
@@ -132,10 +241,25 @@ async function saveAuthConfig() {
   }
 }
 
+function roleLabel(r) { return { user: 'user', administrator: 'administrator', operator: 'operator' }[r] || r }
+
+function toggleUserGroup(name) {
+  const s = newProxyUser.value.selectedGroups
+  if (s.has(name)) s.delete(name)
+  else s.add(name)
+}
+
 async function createProxyUser() {
   try {
-    await postJson('/api/proxy-users', newProxyUser.value)
-    newProxyUser.value = { username: '', password: '' }
+    await postJson('/api/proxy-users', {
+      username: newProxyUser.value.username,
+      password: newProxyUser.value.password,
+      email: newProxyUser.value.email,
+      role: newProxyUser.value.role,
+      groups: [...newProxyUser.value.selectedGroups],
+    })
+    newProxyUser.value = { username: '', password: '', email: '', role: 'user', selectedGroups: new Set() }
+    pwShow.value = false
     proxyUserMessage.value = '代理认证用户保存成功'
     await load()
   } catch {
@@ -150,6 +274,38 @@ async function deleteProxyUser(username) {
     await load()
   } catch {
     proxyUserMessage.value = '删除用户失败'
+  }
+}
+
+function toggleGroupUser(username) {
+  const s = newGroup.value.selectedUsers
+  if (s.has(username)) s.delete(username)
+  else s.add(username)
+}
+
+async function saveGroup() {
+  const name = newGroup.value.name.trim()
+  if (!name) {
+    groupMessage.value = '请输入组名'
+    return
+  }
+  try {
+    await postJson('/api/user-groups', { name, users: [...newGroup.value.selectedUsers] })
+    newGroup.value = { name: '', selectedUsers: new Set() }
+    groupMessage.value = '用户组保存成功'
+    await load()
+  } catch {
+    groupMessage.value = '用户组保存失败'
+  }
+}
+
+async function deleteGroup(name) {
+  try {
+    await deleteJson('/api/user-groups', { name })
+    groupMessage.value = `用户组 ${name} 已删除`
+    await load()
+  } catch {
+    groupMessage.value = '删除用户组失败'
   }
 }
 

@@ -214,15 +214,11 @@
 
             <label class="field-block">
               <span>生效用户</span>
-              <div v-if="proxyUsers.users.length" class="rule-user-chips">
-                <button
-                  v-for="u in proxyUsers.users"
-                  :key="u.username"
-                  class="rule-user-chip"
-                  @click.stop="appendUserToRule(u.username)"
-                >+ {{ u.username }}</button>
-              </div>
-              <textarea v-model="accessRules[selectedRuleIndex].usersText" rows="3" placeholder="test001&#10;user002"></textarea>
+              <SearchableUserSelect
+                v-model="accessRules[selectedRuleIndex].usersText"
+                :users="proxyUsers.users"
+                :groups="userGroups"
+              />
             </label>
 
             <div class="rule-cond-grid">
@@ -335,6 +331,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { getJson, postJson } from '../api'
 import PolicySwitch from '../components/PolicySwitch.vue'
+import SearchableUserSelect from '../components/SearchableUserSelect.vue'
 
 const router = useRouter()
 
@@ -365,6 +362,7 @@ const accessForm = ref({
 const accessRules = ref([])
 const selectedRuleIndex = ref(null)
 const proxyUsers = ref({ users: [] })
+const userGroups = ref([])
 const policyTest = ref({ user: '', host: '', url: '/', method: 'GET' })
 const policyTestResult = ref('')
 
@@ -381,7 +379,7 @@ const asLines = (text) =>
 const createEditableRule = (rule = {}) => ({
   id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
   name: rule.name || '',
-  usersText: (rule.users || []).join('\n'),
+  usersText: [...(rule.users || []), ...(rule.groups || []).map(g => '@' + g)].join('\n'),
   domainText: ((rule.domain_whitelist && rule.domain_whitelist.length ? rule.domain_whitelist : rule.domain_blacklist) || []).join('\n'),
   urlText: ((rule.url_whitelist && rule.url_whitelist.length ? rule.url_whitelist : rule.url_blacklist) || []).join('\n'),
   urlCategoryText: ((rule.url_category_whitelist && rule.url_category_whitelist.length ? rule.url_category_whitelist : rule.url_category_blacklist) || []).join('\n'),
@@ -400,24 +398,21 @@ function removeRule(index) {
   accessRules.value.splice(index, 1)
 }
 
-function appendUserToRule(username) {
-  if (selectedRuleIndex.value === null) return
-  const rule = accessRules.value[selectedRuleIndex.value]
-  const existing = (rule.usersText || '').trim()
-  rule.usersText = existing ? existing + '\n' + username : username
-}
-
 function serializeRules() {
-  return accessRules.value.map((rule, index) => ({
-    name: String(rule.name || '').trim() || `rule-${index + 1}`,
-    users: asLines(rule.usersText),
-    domain_whitelist: rule.action === 'allow' ? asLines(rule.domainText) : [],
-    domain_blacklist: rule.action === 'block' ? asLines(rule.domainText) : [],
-    url_whitelist: rule.action === 'allow' ? asLines(rule.urlText) : [],
-    url_blacklist: rule.action === 'block' ? asLines(rule.urlText) : [],
-    url_category_whitelist: rule.action === 'allow' ? asLines(rule.urlCategoryText) : [],
-    url_category_blacklist: rule.action === 'block' ? asLines(rule.urlCategoryText) : [],
-  }))
+  return accessRules.value.map((rule, index) => {
+    const allUsers = asLines(rule.usersText)
+    return {
+      name: String(rule.name || '').trim() || `rule-${index + 1}`,
+      users: allUsers.filter(u => !u.startsWith('@')),
+      groups: allUsers.filter(u => u.startsWith('@')).map(g => g.slice(1)),
+      domain_whitelist: rule.action === 'allow' ? asLines(rule.domainText) : [],
+      domain_blacklist: rule.action === 'block' ? asLines(rule.domainText) : [],
+      url_whitelist: rule.action === 'allow' ? asLines(rule.urlText) : [],
+      url_blacklist: rule.action === 'block' ? asLines(rule.urlText) : [],
+      url_category_whitelist: rule.action === 'allow' ? asLines(rule.urlCategoryText) : [],
+      url_category_blacklist: rule.action === 'block' ? asLines(rule.urlCategoryText) : [],
+    }
+  })
 }
 
 async function load() {
@@ -425,6 +420,7 @@ async function load() {
     policy.value = await getJson('/api/policy')
     const access = await getJson('/api/access-policy')
     try { proxyUsers.value = await getJson('/api/proxy-users') } catch {}
+    try { userGroups.value = await getJson('/api/user-groups') } catch {}
     try { const ac = await getJson('/api/auth-config'); mitmEnabled.value = !!ac.enable_https_mitm } catch {}
     accessForm.value = {
       domain_whitelist: (access.domain_whitelist || []).join('\n'),

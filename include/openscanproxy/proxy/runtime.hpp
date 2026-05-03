@@ -29,35 +29,163 @@
 
 namespace openscanproxy::proxy {
 
-class ProxyAuthStore {
+struct ProxyUser {
+  std::string username;
+  std::string password;
+  std::string email;
+  std::string role{"user"};
+  std::vector<std::string> groups;
+};
+
+class UserGroupStore {
  public:
-  explicit ProxyAuthStore(const config::AppConfig& cfg) : enabled_(cfg.enable_proxy_auth), users_file_(cfg.proxy_users_file) {
-    if (!cfg.proxy_auth_user.empty()) users_[cfg.proxy_auth_user] = cfg.proxy_auth_password;
-    load_from_file_locked();
+  void load_from_file() {
+    std::lock_guard<std::mutex> lk(mu_);
+    groups_.clear();
+    std::ifstream ifs("./configs/user_groups.json");
+    if (!ifs) return;
+    std::stringstream ss;
+    ss << ifs.rdbuf();
+    const auto text = ss.str();
+    // Match individual groups: {"name":"...","users":[...]}
+    std::regex group_re(
+        "\\{\\s*\\\"name\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\\s*,\\s*\\\"users\\\"\\s*:\\s*\\[([^\\]]*)\\]\\s*\\}");
+    for (std::sregex_iterator it(text.begin(), text.end(), group_re), end; it != end; ++it) {
+      std::string name = (*it)[1].str();
+      std::string users_json = (*it)[2].str();
+      std::vector<std::string> users;
+      std::regex user_re("\"([^\"]+)\"");
+      for (std::sregex_iterator jt(users_json.begin(), users_json.end(), user_re), jend; jt != jend; ++jt) {
+        users.push_back((*jt)[1].str());
+      }
+      groups_[name] = std::move(users);
+    }
   }
 
-  bool enabled() const { return enabled_; }
+  std::vector<std::string> list_group_names() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<std::string> out;
+    out.reserve(groups_.size());
+    for (const auto& [name, _] : groups_) out.push_back(name);
+    return out;
+  }
+
+  std::vector<std::string> get_group_members(const std::string& name) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = groups_.find(name);
+    if (it == groups_.end()) return {};
+    return it->second;
+  }
+
+  bool upsert_group(const std::string& name, const std::vector<std::string>& users) {
+    if (name.empty()) return false;
+    std::lock_guard<std::mutex> lk(mu_);
+    groups_[name] = users;
+    persist_locked();
+    return true;
+  }
+
+  bool remove_group(const std::string& name) {
+    if (name.empty()) return false;
+    std::lock_guard<std::mutex> lk(mu_);
+    if (groups_.erase(name) == 0) return false;
+    persist_locked();
+    return true;
+  }
+
+ private:
+  void persist_locked() const {
+    auto parent = std::filesystem::path("./configs/user_groups.json").parent_path();
+    if (!parent.empty()) std::filesystem::create_directories(parent);
+    std::ofstream ofs("./configs/user_groups.json", std::ios::trunc);
+    if (!ofs) return;
+    ofs << "{\"groups\":[";
+    std::size_t i = 0;
+    for (const auto& [name, users] : groups_) {
+      if (i++) ofs << ",";
+      ofs << "{\"name\":\"" << json_escape(name) << "\",\"users\":[";
+      for (std::size_t j = 0; j < users.size(); ++j) {
+        if (j) ofs << ",";
+        ofs << "\"" << json_escape(users[j]) << "\"";
+      }
+      ofs << "]}";
+    }
+    ofs << "]}";
+  }
+
+  static std::string json_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 4);
+    for (char c : s) {
+      if (c == '"' || c == '\\') out += '\\';
+      out += c;
+    }
+    return out;
+  }
+
+  mutable std::mutex mu_;
+  std::unordered_map<std::string, std::vector<std::string>> groups_;
+};
+
+class ProxyAuthStore {
+ public:
+  ProxyAuthStore() = default;
+
+  void set_store(policy::PolicyStore* store) { store_ = store; }
   void set_enabled(bool enabled) { enabled_ = enabled; }
+  bool enabled() const { return enabled_; }
+
+  void reload() {
+    if (!store_) return;
+    auto rows = store_->load_proxy_users();
+    std::lock_guard<std::mutex> lk(mu_);
+    users_.clear();
+    for (auto& r : rows) {
+      ProxyUser u;
+      u.username = std::move(r.username);
+      u.password = std::move(r.password);
+      u.email = std::move(r.email);
+      u.role = std::move(r.role);
+      u.groups = std::move(r.groups);
+      users_[u.username] = std::move(u);
+    }
+  }
 
   bool authenticate(const std::string& user, const std::string& password) const {
     std::lock_guard<std::mutex> lk(mu_);
     auto it = users_.find(user);
-    return it != users_.end() && it->second == password;
+    return it != users_.end() && it->second.password == password;
   }
 
-  bool upsert_user(const std::string& user, const std::string& password) {
+  bool upsert_user(const std::string& user, const std::string& password,
+                   const std::string& email = "", const std::string& role = "user",
+                   const std::vector<std::string>& groups = {}) {
     if (user.empty() || password.empty()) return false;
+    if (!store_) return false;
+    policy::PolicyStore::ProxyUserRow row;
+    row.username = user;
+    row.password = password;
+    row.email = email;
+    row.role = role;
+    row.groups = groups;
+    if (!store_->save_proxy_user(row)) return false;
     std::lock_guard<std::mutex> lk(mu_);
-    users_[user] = password;
-    persist_to_file_locked();
+    ProxyUser u;
+    u.username = user;
+    u.password = password;
+    u.email = email;
+    u.role = role;
+    u.groups = groups;
+    users_[user] = std::move(u);
     return true;
   }
 
   bool remove_user(const std::string& user) {
     if (user.empty()) return false;
+    if (!store_) return false;
+    if (!store_->delete_proxy_user(user)) return false;
     std::lock_guard<std::mutex> lk(mu_);
-    if (!users_.erase(user)) return false;
-    persist_to_file_locked();
+    users_.erase(user);
     return true;
   }
 
@@ -69,60 +197,47 @@ class ProxyAuthStore {
     return out;
   }
 
- private:
-  static std::string json_escape(const std::string& in) {
-    std::string out;
-    out.reserve(in.size());
-    for (char c : in) {
-      switch (c) {
-        case '"': out += "\\\""; break;
-        case '\\': out += "\\\\"; break;
-        case '\n': out += "\\n"; break;
-        case '\r': out += "\\r"; break;
-        case '\t': out += "\\t"; break;
-        default: out.push_back(c); break;
-      }
-    }
+  std::vector<ProxyUser> list_users_full() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<ProxyUser> out;
+    out.reserve(users_.size());
+    for (const auto& [_, u] : users_) out.push_back(u);
     return out;
   }
 
-  void load_from_file_locked() {
-    if (users_file_.empty() || !std::filesystem::exists(users_file_)) return;
-    std::ifstream ifs(users_file_);
-    if (!ifs) return;
-    std::stringstream ss;
-    ss << ifs.rdbuf();
-    auto text = ss.str();
-    std::regex item("\\{\\s*\\\"username\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\\s*,\\s*\\\"password\\\"\\s*:\\s*\\\"([^\\\"]*)\\\"\\s*\\}");
-    for (std::sregex_iterator it(text.begin(), text.end(), item), end; it != end; ++it) {
-      auto username = (*it)[1].str();
-      auto password = (*it)[2].str();
-      if (!username.empty()) users_[username] = password;
-    }
+  std::optional<ProxyUser> get_user(const std::string& username) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = users_.find(username);
+    if (it == users_.end()) return std::nullopt;
+    return it->second;
   }
 
-  void persist_to_file_locked() const {
-    if (users_file_.empty()) return;
-    std::filesystem::create_directories(std::filesystem::path(users_file_).parent_path());
-    std::ofstream ofs(users_file_, std::ios::trunc);
-    if (!ofs) return;
-    std::vector<std::string> usernames;
-    usernames.reserve(users_.size());
-    for (const auto& [u, _] : users_) usernames.push_back(u);
-    std::sort(usernames.begin(), usernames.end());
-    ofs << "{\"users\":[";
-    for (std::size_t i = 0; i < usernames.size(); ++i) {
-      if (i) ofs << ",";
-      const auto& u = usernames[i];
-      ofs << "{\"username\":\"" << json_escape(u) << "\",\"password\":\"" << json_escape(users_.at(u)) << "\"}";
-    }
-    ofs << "]}";
+  void add_user_direct(const std::string& user, const std::string& password,
+                       const std::string& email = "", const std::string& role = "user",
+                       const std::vector<std::string>& groups = {}) {
+    if (user.empty() || password.empty()) return;
+    std::lock_guard<std::mutex> lk(mu_);
+    ProxyUser u;
+    u.username = user;
+    u.password = password;
+    u.email = email;
+    u.role = role;
+    u.groups = groups;
+    users_[user] = std::move(u);
   }
 
+  bool seed_initial_admin(const std::string& username, const std::string& password,
+                          const std::string& email = "") {
+    if (!store_ || username.empty() || password.empty()) return false;
+    if (store_->has_any_admin_user()) return false;
+    return upsert_user(username, password, email, "administrator", {});
+  }
+
+ private:
   bool enabled_{false};
-  std::string users_file_;
+  policy::PolicyStore* store_{nullptr};
   mutable std::mutex mu_;
-  std::unordered_map<std::string, std::string> users_;
+  std::unordered_map<std::string, ProxyUser> users_;
 };
 
 struct PortalSession {
@@ -617,29 +732,23 @@ struct Runtime {
   audit::AuditLogger audit;
   stats::StatsRegistry stats;
   tlsmitm::TLSMitmEngine tls_mitm;
+  UserGroupStore user_groups;
   policy::PolicyStore* policy_store{nullptr};  // non-owning, set by main()
+
+  // Auth runtime state (loaded from DB, persisted via admin API)
+  bool auth_enabled{false};
+  std::string auth_mode{"basic"};
+  bool mitm_enabled{false};
 
   explicit Runtime(config::AppConfig cfg)
       : config(std::move(cfg)),
-        proxy_auth(config),
         portal_sessions(config),
         portal_client_auth(config),
-        policy(policy::PolicyConfig{config.policy_mode != "fail-close",
-                                    config.suspicious_action == "block",
-                                    config.domain_whitelist,
-                                    config.domain_blacklist,
-                                    config.user_whitelist,
-                                    config.user_blacklist,
-                                    config.url_whitelist,
-                                    config.url_blacklist,
-                                    config.url_category_whitelist,
-                                    config.url_category_blacklist,
-                                    config.access_rules,
-                                    policy::access_action_from_string(config.default_access_action)}),
+        policy(policy::PolicyConfig{}),
         audit(config.audit_log_path, config.audit_recent_limit) {}
 
-  bool portal_auth_enabled() const { return config.enable_proxy_auth && config.proxy_auth_mode != "basic"; }
-  bool proxy_basic_enabled() const { return config.enable_proxy_auth && config.proxy_auth_mode != "portal"; }
+  bool portal_auth_enabled() const { return auth_enabled && auth_mode != "basic"; }
+  bool proxy_basic_enabled() const { return auth_enabled && auth_mode != "portal"; }
   std::string proxy_auth_cookie_name_for_scheme(bool secure_cookie) const {
     return secure_cookie ? config.proxy_auth_cookie_name : config.proxy_auth_insecure_cookie_name;
   }

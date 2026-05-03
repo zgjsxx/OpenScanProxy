@@ -115,6 +115,7 @@ if(BUILD_TESTING)
       src/extractor/extractor.cpp
       src/scanner/mock_scanner.cpp
       src/policy/policy.cpp
+      src/policy/policy_store.cpp
       src/audit/audit.cpp
       src/stats/stats.cpp
       src/tlsmitm/tls_mitm.cpp
@@ -123,7 +124,7 @@ if(BUILD_TESTING)
       src/auth/auth_portal_server.cpp
     )
     target_include_directories(integration_test PRIVATE include)
-    target_link_libraries(integration_test PRIVATE OpenSSL::SSL OpenSSL::Crypto pthread)
+    target_link_libraries(integration_test PRIVATE OpenSSL::SSL OpenSSL::Crypto PostgreSQL::PostgreSQL pthread)
     add_test(NAME integration_test COMMAND integration_test)
   endif()
 

@@ -107,13 +107,16 @@ cmake --build build -j
 
 如需开启代理鉴权（Basic）：
 - `enable_proxy_auth=true`
-- `proxy_auth_user`
-- `proxy_auth_password`
-- `proxy_users_file`（代理用户持久化文件，默认 `./configs/proxy_users.json`）
+- `proxy_auth_mode=basic`
+
+首次部署时通过环境变量创建初始管理员：
+- `OSPROXY_INIT_ADMIN_USER` — 初始管理员用户名
+- `OSPROXY_INIT_ADMIN_PASSWORD` — 初始管理员密码
+- `OSPROXY_INIT_ADMIN_EMAIL`（可选）— 初始管理员邮箱
 
 未携带或鉴权失败将返回 `407 Proxy Authentication Required`。
 
-你也可以在管理后台 `/policy` 页面创建代理用户；创建后会自动启用代理鉴权，客户端首次访问会收到浏览器用户名/密码弹窗。创建/更新的用户会持久化写入 `proxy_users_file`。
+你也可以在管理后台创建代理用户；创建后会自动启用代理鉴权，客户端首次访问会收到浏览器用户名/密码弹窗。用户数据存储在 PostgreSQL 数据库中。
 
 ## 生成本地 CA（用于 HTTPS MITM）
 

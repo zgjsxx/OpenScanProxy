@@ -1,6 +1,7 @@
 #include "openscanproxy/policy/policy.hpp"
 
 #include "openscanproxy/core/util.hpp"
+#include "openscanproxy/proxy/runtime.hpp"
 
 #include <fstream>
 #include <unordered_map>
@@ -198,8 +199,20 @@ AccessPolicyResult PolicyEngine::evaluate_access(const std::string& host, const 
   if (find_matched_rule(cfg.url_category_blacklist, category, hit)) {
     return {AccessAction::Block, hit, "url_category_blacklist", "matched url category blacklist", category};
   }
+  auto* ug = static_cast<proxy::UserGroupStore*>(user_groups_);
   for (const auto& rule : cfg.access_rules) {
-    if (!user_matches_rule(rule.users, user_l)) continue;
+    bool user_ok = user_matches_rule(rule.users, user_l);
+    if (!user_ok && ug && !user_l.empty()) {
+      for (const auto& gn : rule.groups) {
+        auto members = ug->get_group_members(gn);
+        std::string hit;
+        if (find_matched_rule(members, user_l, hit)) {
+          user_ok = true;
+          break;
+        }
+      }
+    }
+    if (!user_ok) continue;
     auto result = evaluate_named_rule(rule, host_l, url, category);
     if (!result.matched_type.empty()) return result;
   }

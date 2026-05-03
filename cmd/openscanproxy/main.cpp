@@ -7,6 +7,7 @@
 #include "openscanproxy/scanner/scanner.hpp"
 
 #include <csignal>
+#include <cstdlib>
 #include <memory>
 #include <sstream>
 #include <thread>
@@ -29,79 +30,55 @@ int main(int argc, char** argv) {
              << " user=" << cfg.db_user
              << " password=" << cfg.db_password;
     policy::PolicyStore policy_store(conninfo.str());
-    if (policy_store.init_db()) {
-      if (policy_store.has_policy_data()) {
-        auto db_policy = policy_store.load_policy();
-        // Override config fields with DB-loaded policy
-        cfg.policy_mode = db_policy.fail_open ? "fail-open" : "fail-close";
-        cfg.suspicious_action = db_policy.block_suspicious ? "block" : "log";
-        cfg.default_access_action = policy::to_string(db_policy.default_access_action);
-        cfg.domain_whitelist = std::move(db_policy.domain_whitelist);
-        cfg.domain_blacklist = std::move(db_policy.domain_blacklist);
-        cfg.user_whitelist = std::move(db_policy.user_whitelist);
-        cfg.user_blacklist = std::move(db_policy.user_blacklist);
-        cfg.url_whitelist = std::move(db_policy.url_whitelist);
-        cfg.url_blacklist = std::move(db_policy.url_blacklist);
-        cfg.url_category_whitelist = std::move(db_policy.url_category_whitelist);
-        cfg.url_category_blacklist = std::move(db_policy.url_category_blacklist);
-        cfg.access_rules = std::move(db_policy.access_rules);
-        auto sp = policy_store.load_scan_policy();
-        cfg.scan_upload = sp.scan_upload;
-        cfg.scan_download = sp.scan_download;
-        cfg.max_scan_file_size = sp.max_scan_file_size;
-        cfg.scan_timeout_ms = sp.scan_timeout_ms;
-        cfg.allowed_mime = std::move(sp.allowed_mime);
-        cfg.allowed_extensions = std::move(sp.allowed_extensions);
-        core::app_logger().log(core::LogLevel::Info, "policy loaded from database");
-      } else {
-        // First run: migrate policy from config.json into the database
-        policy::PolicyConfig p{cfg.policy_mode != "fail-close",
-                                cfg.suspicious_action == "block",
-                                cfg.domain_whitelist,
-                                cfg.domain_blacklist,
-                                cfg.user_whitelist,
-                                cfg.user_blacklist,
-                                cfg.url_whitelist,
-                                cfg.url_blacklist,
-                                cfg.url_category_whitelist,
-                                cfg.url_category_blacklist,
-                                cfg.access_rules,
-                                policy::access_action_from_string(cfg.default_access_action)};
-        policy_store.save_policy(p);
-        policy::PolicyStore::ScanPolicy sp;
-        sp.fail_open = p.fail_open;
-        sp.block_suspicious = p.block_suspicious;
-        sp.scan_upload = cfg.scan_upload;
-        sp.scan_download = cfg.scan_download;
-        sp.max_scan_file_size = cfg.max_scan_file_size;
-        sp.scan_timeout_ms = cfg.scan_timeout_ms;
-        sp.allowed_mime = cfg.allowed_mime;
-        sp.allowed_extensions = cfg.allowed_extensions;
-        policy_store.save_scan_policy(sp);
-        core::app_logger().log(core::LogLevel::Info, "policy migrated from config.json to database");
-      }
+    policy_store.init_db();
+
+    // Load policy from database (use defaults if DB is empty)
+    policy::PolicyConfig db_policy;
+    policy::PolicyStore::ScanPolicy sp;
+    if (policy_store.has_policy_data()) {
+      db_policy = policy_store.load_policy();
+      sp = policy_store.load_scan_policy();
+      core::app_logger().log(core::LogLevel::Info, "policy loaded from database");
     } else {
-      core::app_logger().log(core::LogLevel::Warn, "policy store init failed, using config.json policy only");
+      core::app_logger().log(core::LogLevel::Info, "database is empty, using default policy");
     }
 
-    // Load or migrate auth config
+    // Load auth config from database
+    policy::PolicyStore::AuthConfig ac;
     if (policy_store.has_auth_config_data()) {
-      auto db_auth = policy_store.load_auth_config();
-      cfg.enable_proxy_auth = db_auth.enable_proxy_auth;
-      cfg.proxy_auth_mode = db_auth.proxy_auth_mode;
-      cfg.enable_https_mitm = db_auth.enable_https_mitm;
+      ac = policy_store.load_auth_config();
       core::app_logger().log(core::LogLevel::Info,
                              "auth config loaded from db: enable=" +
-                                 std::string(db_auth.enable_proxy_auth ? "true" : "false") +
-                                 " mode=" + db_auth.proxy_auth_mode +
-                                 " mitm=" + std::string(db_auth.enable_https_mitm ? "true" : "false"));
-    } else {
-      policy_store.save_auth_config(cfg.enable_proxy_auth, cfg.proxy_auth_mode, cfg.enable_https_mitm);
-      core::app_logger().log(core::LogLevel::Info, "auth config migrated from config.json to database");
+                                 std::string(ac.enable_proxy_auth ? "true" : "false") +
+                                 " mode=" + ac.proxy_auth_mode +
+                                 " mitm=" + std::string(ac.enable_https_mitm ? "true" : "false"));
     }
 
     proxy::Runtime runtime(cfg);
     runtime.policy_store = &policy_store;
+    runtime.user_groups.load_from_file();
+    runtime.policy.update(db_policy);
+    runtime.policy.set_user_group_provider(&runtime.user_groups);
+
+    // Apply DB-loaded auth state
+    runtime.auth_enabled = ac.enable_proxy_auth;
+    runtime.auth_mode = ac.proxy_auth_mode;
+    runtime.mitm_enabled = ac.enable_https_mitm;
+
+    // Initialize proxy auth from database
+    runtime.proxy_auth.set_store(&policy_store);
+    runtime.proxy_auth.set_enabled(ac.enable_proxy_auth);
+    runtime.proxy_auth.reload();
+    // Seed initial admin from environment variables if no admin exists yet
+    const char* seed_user = std::getenv("OSPROXY_INIT_ADMIN_USER");
+    const char* seed_pass = std::getenv("OSPROXY_INIT_ADMIN_PASSWORD");
+    if (seed_user && seed_pass && seed_user[0] && seed_pass[0]) {
+      const char* seed_email = std::getenv("OSPROXY_INIT_ADMIN_EMAIL");
+      if (runtime.proxy_auth.seed_initial_admin(seed_user, seed_pass, seed_email ? seed_email : "")) {
+        core::app_logger().log(core::LogLevel::Info,
+                               std::string("seeded initial admin user: ") + seed_user);
+      }
+    }
 
     if (policy::load_domain_categories_from_csv(cfg.domain_category_data_file)) {
       core::app_logger().log(core::LogLevel::Info, "loaded domain categories from: " + cfg.domain_category_data_file);
@@ -110,7 +87,8 @@ int main(int argc, char** argv) {
                              "failed to load domain categories from: " + cfg.domain_category_data_file);
     }
 
-    runtime.scan_ctx.timeout_ms = cfg.scan_timeout_ms;
+    runtime.scan_ctx.timeout_ms = sp.scan_timeout_ms;
+    runtime.scan_ctx.max_scan_file_size = sp.max_scan_file_size;
     if (cfg.scanner_type == "clamav") {
       runtime.scanner = scanner::create_clamav_scanner(cfg.clamav_mode, cfg.clamav_unix_socket, cfg.clamav_host, cfg.clamav_port);
     } else {

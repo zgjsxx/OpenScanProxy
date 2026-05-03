@@ -143,7 +143,8 @@ CREATE TABLE IF NOT EXISTS access_rules (
     url_blacklist           JSONB NOT NULL DEFAULT '[]',
     url_category_whitelist  JSONB NOT NULL DEFAULT '[]',
     url_category_blacklist  JSONB NOT NULL DEFAULT '[]',
-    users                   JSONB NOT NULL DEFAULT '[]'
+    users                   JSONB NOT NULL DEFAULT '[]',
+    groups                  JSONB NOT NULL DEFAULT '[]'
 );
 
 CREATE INDEX IF NOT EXISTS idx_access_rules_order ON access_rules (rule_order);
@@ -153,6 +154,14 @@ CREATE TABLE IF NOT EXISTS auth_config (
     enable_proxy_auth   BOOLEAN NOT NULL DEFAULT false,
     proxy_auth_mode     TEXT NOT NULL DEFAULT 'basic',
     enable_https_mitm   BOOLEAN NOT NULL DEFAULT false
+);
+
+CREATE TABLE IF NOT EXISTS proxy_users (
+    username    TEXT PRIMARY KEY,
+    password    TEXT NOT NULL,
+    email       TEXT NOT NULL DEFAULT '',
+    role        TEXT NOT NULL DEFAULT 'user',
+    groups      JSONB NOT NULL DEFAULT '[]'
 );
 )SQL";
   return exec_simple(ddl);
@@ -265,7 +274,7 @@ PolicyConfig PolicyStore::load_policy() {
   // Load access rules
   auto r = exec(conn_,
                 "SELECT name, domain_whitelist, domain_blacklist, url_whitelist, url_blacklist, "
-                "url_category_whitelist, url_category_blacklist, users "
+                "url_category_whitelist, url_category_blacklist, users, groups "
                 "FROM access_rules ORDER BY rule_order");
   if (ok(r.get())) {
     int n = PQntuples(r.get());
@@ -280,6 +289,7 @@ PolicyConfig PolicyStore::load_policy() {
       rule.url_category_whitelist = parse_json_string_array(PQgetvalue(r.get(), i, 5));
       rule.url_category_blacklist = parse_json_string_array(PQgetvalue(r.get(), i, 6));
       rule.users = parse_json_string_array(PQgetvalue(r.get(), i, 7));
+      rule.groups = parse_json_string_array(PQgetvalue(r.get(), i, 8));
       p.access_rules.push_back(std::move(rule));
     }
   }
@@ -332,7 +342,7 @@ bool PolicyStore::save_policy(const PolicyConfig& p) {
     const auto& rule = p.access_rules[i];
     sql << "INSERT INTO access_rules "
            "(rule_order, name, domain_whitelist, domain_blacklist, url_whitelist, url_blacklist, "
-           "url_category_whitelist, url_category_blacklist, users) VALUES ("
+           "url_category_whitelist, url_category_blacklist, users, groups) VALUES ("
         << i << ", "
         << escape_literal(conn_, rule.name) << ", "
         << escape_literal(conn_, json_array(rule.domain_whitelist)) << ", "
@@ -341,7 +351,8 @@ bool PolicyStore::save_policy(const PolicyConfig& p) {
         << escape_literal(conn_, json_array(rule.url_blacklist)) << ", "
         << escape_literal(conn_, json_array(rule.url_category_whitelist)) << ", "
         << escape_literal(conn_, json_array(rule.url_category_blacklist)) << ", "
-        << escape_literal(conn_, json_array(rule.users)) << ");";
+        << escape_literal(conn_, json_array(rule.users)) << ", "
+        << escape_literal(conn_, json_array(rule.groups)) << ");";
   }
 
   sql << "COMMIT;";
@@ -378,6 +389,53 @@ bool PolicyStore::save_auth_config(bool enable, const std::string& mode, bool en
          "proxy_auth_mode = EXCLUDED.proxy_auth_mode, "
          "enable_https_mitm = EXCLUDED.enable_https_mitm";
   return exec_simple(sql.str());
+}
+
+std::vector<PolicyStore::ProxyUserRow> PolicyStore::load_proxy_users() {
+  std::vector<ProxyUserRow> out;
+  if (!conn_) return out;
+  auto r = exec(conn_, "SELECT username, password, email, role, groups FROM proxy_users ORDER BY username");
+  if (!ok(r.get())) return out;
+  int n = PQntuples(r.get());
+  for (int i = 0; i < n; ++i) {
+    ProxyUserRow u;
+    auto v = PQgetvalue(r.get(), i, 0); if (v) u.username = v;
+    v = PQgetvalue(r.get(), i, 1); if (v) u.password = v;
+    v = PQgetvalue(r.get(), i, 2); if (v) u.email = v;
+    v = PQgetvalue(r.get(), i, 3); if (v) u.role = v;
+    u.groups = parse_json_string_array(PQgetvalue(r.get(), i, 4));
+    out.push_back(std::move(u));
+  }
+  return out;
+}
+
+bool PolicyStore::save_proxy_user(const ProxyUserRow& user) {
+  if (!conn_ || user.username.empty() || user.password.empty()) return false;
+  std::ostringstream sql;
+  sql << "INSERT INTO proxy_users (username, password, email, role, groups) VALUES ("
+      << escape_literal(conn_, user.username) << ", "
+      << escape_literal(conn_, user.password) << ", "
+      << escape_literal(conn_, user.email) << ", "
+      << escape_literal(conn_, user.role) << ", "
+      << escape_literal(conn_, json_array(user.groups)) << ") "
+         "ON CONFLICT (username) DO UPDATE SET "
+         "password = EXCLUDED.password, "
+         "email = EXCLUDED.email, "
+         "role = EXCLUDED.role, "
+         "groups = EXCLUDED.groups";
+  return exec_simple(sql.str());
+}
+
+bool PolicyStore::delete_proxy_user(const std::string& username) {
+  if (!conn_ || username.empty()) return false;
+  return exec_simple(
+      std::string("DELETE FROM proxy_users WHERE username = ") + escape_literal(conn_, username));
+}
+
+bool PolicyStore::has_any_admin_user() {
+  if (!conn_) return false;
+  auto v = query_one_string("SELECT username FROM proxy_users WHERE role IN ('administrator','operator') LIMIT 1", "username");
+  return !v.empty();
 }
 
 }  // namespace openscanproxy::policy

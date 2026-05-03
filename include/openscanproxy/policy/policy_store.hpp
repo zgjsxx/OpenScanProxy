@@ -54,6 +54,19 @@ class PolicyStore {
   AuthConfig load_auth_config();
   bool save_auth_config(bool enable, const std::string& mode, bool enable_mitm);
 
+  // Proxy users
+  struct ProxyUserRow {
+    std::string username;
+    std::string password;
+    std::string email;
+    std::string role{"user"};
+    std::vector<std::string> groups;
+  };
+  std::vector<ProxyUserRow> load_proxy_users();
+  bool save_proxy_user(const ProxyUserRow& user);
+  bool delete_proxy_user(const std::string& username);
+  bool has_any_admin_user();
+
  private:
   std::string pq_escape_literal(const std::string& s);
   std::string pq_escape_identifier(const std::string& s);

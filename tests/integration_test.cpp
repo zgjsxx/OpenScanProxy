@@ -219,29 +219,20 @@ struct TestProxyHarness {
   int upstream_port = -1;
   std::filesystem::path temp_dir;
 
-  static AppConfig make_config(const std::filesystem::path& temp_dir, int proxy_port, bool enable_auth = false,
-                               const std::string& auth_mode = "basic") {
+  static AppConfig make_config(const std::filesystem::path& temp_dir, int proxy_port) {
     AppConfig cfg;
     cfg.proxy_listen_host = "127.0.0.1";
     cfg.proxy_listen_port = static_cast<uint16_t>(proxy_port);
     cfg.admin_listen_host = "127.0.0.1";
     cfg.admin_listen_port = 0;
-    cfg.enable_proxy_auth = enable_auth;
-    cfg.proxy_auth_mode = auth_mode;
-    cfg.proxy_auth_user = "testuser";
-    cfg.proxy_auth_password = "testpass";
     cfg.proxy_auth_signing_key = "integration-test-signing-key";
     cfg.proxy_auth_portal_listen_host = "127.0.0.1";
     cfg.proxy_auth_portal_listen_port = 29091;
     cfg.proxy_auth_portal_session_ttl_sec = 3600;
     cfg.scanner_type = "mock";
-    cfg.enable_https_mitm = false;
-    cfg.scan_upload = false;
-    cfg.scan_download = false;
     cfg.app_log_level = "error";
     cfg.app_log_path = (temp_dir / "app.log").string();
     cfg.audit_log_path = (temp_dir / "audit.log").string();
-    cfg.proxy_users_file = (temp_dir / "proxy_users.json").string();
     cfg.proxy_auth_portal_session_file = (temp_dir / "portal_sessions.json").string();
     cfg.proxy_auth_client_cache_file = (temp_dir / "portal_client_cache.json").string();
     cfg.tls_leaf_cache_enabled = false;
@@ -261,9 +252,15 @@ struct TestProxyHarness {
 
     if (!upstream.start(upstream_port)) return false;
 
-    auto cfg = make_config(temp_dir, proxy_port, enable_auth, auth_mode);
+    auto cfg = make_config(temp_dir, proxy_port);
     runtime = std::make_unique<Runtime>(cfg);
     runtime->scanner = openscanproxy::scanner::create_mock_scanner();
+    if (enable_auth) {
+      runtime->auth_enabled = true;
+      runtime->auth_mode = auth_mode;
+      runtime->proxy_auth.set_enabled(true);
+      runtime->proxy_auth.add_user_direct("testuser", "testpass");
+    }
     proxy = std::make_unique<ProxyServer>(*runtime);
     proxy_thread = std::thread([this]() { proxy->run(); });
 

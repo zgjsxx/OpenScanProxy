@@ -8,7 +8,8 @@ namespace openscanproxy::scanner {
 
 // 扫描上下文，传递扫描超时等参数
 struct ScanContext {
-  std::uint64_t timeout_ms{5000};  // 扫描超时时间（毫秒）
+  std::uint64_t timeout_ms{5000};
+  std::size_t max_scan_file_size{5 * 1024 * 1024};
 };
 
 // 扫描器接口（抽象基类）

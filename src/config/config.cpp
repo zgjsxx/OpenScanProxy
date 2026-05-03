@@ -4,8 +4,6 @@
 
 #include <cstdlib>
 #include <fstream>
-#include <optional>
-#include <regex>
 #include <sstream>
 #include <stdexcept>
 
@@ -18,119 +16,6 @@ std::string read_all(const std::string& path) {
   std::stringstream ss;
   ss << ifs.rdbuf();
   return ss.str();
-}
-
-std::vector<std::string> parse_string_array(const std::string& text, const std::string& key) {
-  std::regex arr("\\\"" + key + "\\\"\\s*:\\s*\\[([\\s\\S]*?)\\]", std::regex::icase);
-  std::smatch m;
-  if (!std::regex_search(text, m, arr)) return {};
-  std::vector<std::string> out;
-  std::regex item("\\\"([^\\\"]*)\\\"");
-  for (std::sregex_iterator it(m[1].first, m[1].second, item), end; it != end; ++it) out.push_back((*it)[1].str());
-  return out;
-}
-
-std::optional<std::string> extract_array_body(const std::string& text, const std::string& key) {
-  const std::string needle = "\"" + key + "\"";
-  const auto key_pos = text.find(needle);
-  if (key_pos == std::string::npos) return std::nullopt;
-
-  const auto array_start = text.find('[', key_pos + needle.size());
-  if (array_start == std::string::npos) return std::nullopt;
-
-  bool in_string = false;
-  bool escaped = false;
-  int depth = 0;
-  for (std::size_t i = array_start; i < text.size(); ++i) {
-    const char ch = text[i];
-    if (in_string) {
-      if (escaped) {
-        escaped = false;
-      } else if (ch == '\\') {
-        escaped = true;
-      } else if (ch == '"') {
-        in_string = false;
-      }
-      continue;
-    }
-
-    if (ch == '"') {
-      in_string = true;
-      continue;
-    }
-    if (ch == '[') {
-      ++depth;
-      continue;
-    }
-    if (ch == ']') {
-      --depth;
-      if (depth == 0) return text.substr(array_start + 1, i - array_start - 1);
-    }
-  }
-
-  return std::nullopt;
-}
-
-std::vector<std::string> split_top_level_objects(const std::string& text) {
-  std::vector<std::string> objects;
-  bool in_string = false;
-  bool escaped = false;
-  int depth = 0;
-  std::size_t object_start = std::string::npos;
-
-  for (std::size_t i = 0; i < text.size(); ++i) {
-    const char ch = text[i];
-    if (in_string) {
-      if (escaped) {
-        escaped = false;
-      } else if (ch == '\\') {
-        escaped = true;
-      } else if (ch == '"') {
-        in_string = false;
-      }
-      continue;
-    }
-
-    if (ch == '"') {
-      in_string = true;
-      continue;
-    }
-    if (ch == '{') {
-      if (depth == 0) object_start = i;
-      ++depth;
-      continue;
-    }
-    if (ch == '}') {
-      --depth;
-      if (depth == 0 && object_start != std::string::npos) {
-        objects.push_back(text.substr(object_start, i - object_start + 1));
-        object_start = std::string::npos;
-      }
-    }
-  }
-
-  return objects;
-}
-
-std::vector<policy::AccessRule> parse_access_rules(const std::string& text) {
-  std::vector<policy::AccessRule> rules;
-  const auto body = extract_array_body(text, "access_rules");
-  if (!body) return rules;
-
-  for (const auto& item : split_top_level_objects(*body)) {
-    auto kv = core::parse_simple_json_object(item);
-    policy::AccessRule rule;
-    if (kv.count("name")) rule.name = kv.at("name");
-    rule.users = parse_string_array(item, "users");
-    rule.domain_whitelist = parse_string_array(item, "domain_whitelist");
-    rule.domain_blacklist = parse_string_array(item, "domain_blacklist");
-    rule.url_whitelist = parse_string_array(item, "url_whitelist");
-    rule.url_blacklist = parse_string_array(item, "url_blacklist");
-    rule.url_category_whitelist = parse_string_array(item, "url_category_whitelist");
-    rule.url_category_blacklist = parse_string_array(item, "url_category_blacklist");
-    rules.push_back(std::move(rule));
-  }
-  return rules;
 }
 
 bool as_bool(const std::string& v) { return v == "true" || v == "1"; }
@@ -155,16 +40,8 @@ AppConfig ConfigLoader::load_from_file(const std::string& path) {
   GET_S("admin_static_dir", admin_static_dir);
   GET_S("ca_cert_path", ca_cert_path);
   GET_S("ca_key_path", ca_key_path);
-  GET_B("enable_https_mitm", enable_https_mitm);
   GET_B("tls_leaf_cache_enabled", tls_leaf_cache_enabled);
   GET_S("tls_leaf_cache_dir", tls_leaf_cache_dir);
-  GET_B("scan_upload", scan_upload);
-  GET_B("scan_download", scan_download);
-  GET_US("max_scan_file_size", max_scan_file_size);
-  GET_U64("scan_timeout_ms", scan_timeout_ms);
-  GET_S("policy_mode", policy_mode);
-  GET_S("suspicious_action", suspicious_action);
-  GET_S("default_access_action", default_access_action);
   GET_S("scanner_type", scanner_type);
   GET_S("clamav_mode", clamav_mode);
   GET_S("clamav_unix_socket", clamav_unix_socket);
@@ -176,13 +53,6 @@ AppConfig ConfigLoader::load_from_file(const std::string& path) {
   GET_S("app_log_level", app_log_level);
   GET_US("app_log_max_files", app_log_max_files);
   GET_US("app_log_max_size_mb", app_log_max_size_mb);
-  GET_S("admin_user", admin_user);
-  GET_S("admin_password", admin_password);
-  GET_B("enable_proxy_auth", enable_proxy_auth);
-  GET_S("proxy_auth_mode", proxy_auth_mode);
-  GET_S("proxy_auth_user", proxy_auth_user);
-  GET_S("proxy_auth_password", proxy_auth_password);
-  GET_S("proxy_users_file", proxy_users_file);
   GET_S("proxy_auth_portal_listen_host", proxy_auth_portal_listen_host);
   GET_U16("proxy_auth_portal_listen_port", proxy_auth_portal_listen_port);
   GET_S("proxy_auth_cookie_name", proxy_auth_cookie_name);
@@ -210,23 +80,6 @@ AppConfig ConfigLoader::load_from_file(const std::string& path) {
   if (const char* ev = std::getenv("OSPROXY_DB_USER")) cfg.db_user = ev;
   if (const char* ev = std::getenv("OSPROXY_DB_PASSWORD")) cfg.db_password = ev;
 
-  cfg.allowed_mime = parse_string_array(text, "allowed_mime");
-  cfg.allowed_extensions = parse_string_array(text, "allowed_extensions");
-  cfg.domain_whitelist = parse_string_array(text, "domain_whitelist");
-  cfg.domain_blacklist = parse_string_array(text, "domain_blacklist");
-  cfg.user_whitelist = parse_string_array(text, "user_whitelist");
-  cfg.user_blacklist = parse_string_array(text, "user_blacklist");
-  cfg.url_whitelist = parse_string_array(text, "url_whitelist");
-  cfg.url_blacklist = parse_string_array(text, "url_blacklist");
-  cfg.url_category_whitelist = parse_string_array(text, "url_category_whitelist");
-  cfg.url_category_blacklist = parse_string_array(text, "url_category_blacklist");
-  cfg.access_rules = parse_access_rules(text);
-  if (cfg.proxy_auth_mode != "basic" && cfg.proxy_auth_mode != "portal" && cfg.proxy_auth_mode != "hybrid") {
-    cfg.proxy_auth_mode = "basic";
-  }
-  if (cfg.default_access_action != "allow" && cfg.default_access_action != "block") {
-    cfg.default_access_action = "allow";
-  }
   if (cfg.proxy_auth_portal_session_ttl_sec == 0) cfg.proxy_auth_portal_session_ttl_sec = 3600;
   if (cfg.proxy_auth_token_ttl_sec == 0) cfg.proxy_auth_token_ttl_sec = 120;
   if (cfg.proxy_auth_cookie_name.empty()) cfg.proxy_auth_cookie_name = "osp_proxy_auth";
@@ -235,7 +88,7 @@ AppConfig ConfigLoader::load_from_file(const std::string& path) {
   if (cfg.proxy_auth_portal_session_file.empty()) cfg.proxy_auth_portal_session_file = "./configs/portal_sessions.json";
   if (cfg.proxy_auth_client_cache_file.empty()) cfg.proxy_auth_client_cache_file = "./configs/portal_client_auth_cache.json";
   if (cfg.proxy_auth_signing_key.empty()) {
-    cfg.proxy_auth_signing_key = cfg.admin_password + ":" + cfg.proxy_auth_password + ":openscanproxy";
+    cfg.proxy_auth_signing_key = "openscanproxy-default-signing-key-change-me";
   }
   if (cfg.tls_leaf_cache_dir.empty()) cfg.tls_leaf_cache_dir = "./certs/cache";
   return cfg;
